@@ -97,6 +97,9 @@ func (chain *runtimeProxyFallbackChain) next(ctx context.Context, s *OpenAIGatew
 // cycle, or proxyRepo unavailable). The target carries the actual proxy identity
 // for health/error attribution; zero explicitly identifies direct networking.
 func (s *OpenAIGatewayService) resolveRuntimeProxyFallback(ctx context.Context, account *Account) (runtimeProxyEgress, bool) {
+	if account.IsProxyReplica() {
+		return runtimeProxyEgress{}, false
+	}
 	if account == nil || account.Proxy == nil {
 		return runtimeProxyEgress{}, false
 	}
@@ -187,6 +190,12 @@ func (s *OpenAIGatewayService) doOpenAIProxyAttempt(req *http.Request, account *
 // that HTTP never received a connection before another egress may be tried.
 // A response (including its later stream failures) always ends this loop.
 func (s *OpenAIGatewayService) doUpstreamWithProxyFallback(ctx context.Context, req *http.Request, account *Account, primaryProxyURL string) (*http.Response, error) {
+	if account.IsProxyReplica() {
+		if account.Proxy == nil || account.ProxyID == nil || !account.Proxy.IsActive() || account.Proxy.IsExpired(time.Now()) || primaryProxyURL != account.Proxy.URL() {
+			return nil, errors.New("proxy replica requires its valid bound proxy")
+		}
+		return s.doOpenAIProxyAttempt(req, account, runtimeProxyEgress{url: primaryProxyURL, proxyID: account.Proxy.ID, proxyName: account.Proxy.Name})
+	}
 	primary := runtimeProxyEgress{url: primaryProxyURL, proxyID: -1}
 	if primaryProxyURL == "" {
 		primary.proxyID = 0

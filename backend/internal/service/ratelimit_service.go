@@ -512,8 +512,10 @@ func (s *RateLimitService) handleUpstreamErrorAfterStreakReset(ctx context.Conte
 		// 问题变成影子永久死亡。母账号被标记 temp-unschedulable 后由 parentHealthyForShadow 级联排除影子。
 		// 非影子时 resolveCredentialAccount 返回自身;母账号缺失/损坏(orphan 影子,罕见)时回退到原 account。
 		authAccount := account
-		if resolved, rerr := resolveCredentialAccount(ctx, s.accountRepo, account); rerr == nil && resolved != nil {
-			authAccount = resolved
+		if !account.IsProxyReplica() || !isOpenAIIPUnauthorizedResponse(statusCode, responseBody) {
+			if resolved, rerr := resolveCredentialAccount(ctx, s.accountRepo, account); rerr == nil && resolved != nil {
+				authAccount = resolved
+			}
 		}
 		// OpenAI: token_invalidated / token_revoked 表示 token 被永久作废（非过期），直接标记 error
 		openai401Code := extractUpstreamErrorCode(responseBody)
@@ -1339,6 +1341,13 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 // Callers that do not retry the rejected request (Excel BPS) enter here directly
 // instead of deferring the cooldown for the Codex same-account retry window.
 func (s *RateLimitService) handle429Cooldown(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
+	if account.IsProxyReplica() {
+		owner, err := s.accountRepo.GetByID(ctx, account.CredentialOwnerAccountID())
+		if err != nil || owner == nil {
+			return
+		}
+		account = owner
+	}
 	// Spark 影子：限流/熔断状态 100% 由 QueryUsage(/wham/usage body 的 codex_bengalfox)驱动。
 	// /responses 的 429 携带的 x-codex-*/usage_limit_reached 是 global codex 道(plan/spec §8),
 	// 套到影子会把 spark 误耦合到 global 窗口——即便 spark 仍有配额也会被冷却到 global reset,
@@ -1914,6 +1923,13 @@ func pickSooner(a, b *time.Time) *time.Time {
 func (s *RateLimitService) persistOpenAICodexSnapshot(ctx context.Context, account *Account, headers http.Header) {
 	if s == nil || s.accountRepo == nil || account == nil || headers == nil {
 		return
+	}
+	if account.IsProxyReplica() {
+		owner, err := s.accountRepo.GetByID(ctx, account.CredentialOwnerAccountID())
+		if err != nil || owner == nil {
+			return
+		}
+		account = owner
 	}
 	// spark 影子的 codex_* 仅由 QueryUsage(/wham/usage bengalfox 道)更新,不能被 /responses 的
 	// x-codex-* 全局头快照污染(外审第7轮 P1,与 updateCodexUsageSnapshot 同口径)。

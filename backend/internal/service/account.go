@@ -237,6 +237,9 @@ func accountLoadPreferenceRate(account *Account, loadRate int) int {
 }
 
 func (a *Account) IsSchedulable() bool {
+	if a.IsProxyReplicaSource() {
+		return false
+	}
 	if !a.IsActive() || !a.Schedulable || a.PerformancePaused {
 		return false
 	}
@@ -3772,6 +3775,9 @@ func (a *Account) IsShadow() bool { return a != nil && a.ParentAccountID != nil 
 // RPMAccountID returns the counter owner for per-minute limits. Credential
 // shadows intentionally share their parent account's upstream quota.
 func (a *Account) RPMAccountID() int64 {
+	if a.IsProxyReplica() {
+		return a.CredentialOwnerAccountID()
+	}
 	if a == nil {
 		return 0
 	}

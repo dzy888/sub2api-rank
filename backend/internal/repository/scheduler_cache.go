@@ -1407,6 +1407,7 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		return nil
 	}
 	keys := []string{
+		service.CredentialOwnerAccountIDKey, service.ProxyReplicaSourceKey, service.ProxyReplicaOperationKey,
 		service.OAuthDegradationActionExtraKey,
 		// Images candidate authorization runs before full-account hydration.
 		service.ExtraImageModelsKey,

@@ -281,7 +281,7 @@ func (s *OpenAIQuotaAutoResetService) evaluateAccount(ctx context.Context, accou
 	if err != nil || account == nil {
 		return err
 	}
-	if account.IsShadow() {
+	if account.IsShadow() || account.IsProxyReplica() {
 		if account.ParentAccountID != nil {
 			s.Notify(*account.ParentAccountID)
 		}

@@ -1,5 +1,10 @@
 package service
 
+import (
+	"context"
+	"time"
+)
+
 // parentHealthyForShadow 报告 spark 影子账号的母账号凭据是否可用(影子据此可被调度)。
 //
 // 非影子账号直接返回 true（不受此检查约束）。
@@ -14,6 +19,14 @@ package service
 // 母账号 global 429 不得连坐 spark 影子,否则会重新耦合影子架构本应解耦的两条 429 道。
 // 母账号未找到(nil)、非 OpenAI OAuth、或凭据不可用时影子被挡。
 func parentHealthyForShadow(account *Account, lookup func(int64) *Account) bool {
+	if account.IsProxyReplica() {
+		owner := lookup(account.CredentialOwnerAccountID())
+		if account.ProxyID == nil || !ProxyReplicaOwnerUsable(owner, time.Now()) {
+			return false
+		}
+		paused, _ := shouldAutoPauseOpenAIAccountByQuota(context.Background(), owner)
+		return !paused
+	}
 	if account == nil || !account.IsShadow() {
 		return true
 	}

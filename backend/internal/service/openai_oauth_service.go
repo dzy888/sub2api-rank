@@ -15,12 +15,14 @@ import (
 
 // OpenAIOAuthService handles OpenAI OAuth authentication flows
 type OpenAIOAuthService struct {
-	sessionStore           *openai.SessionStore
-	proxyRepo              ProxyRepository
-	oauthClient            OpenAIOAuthClient
-	privacyClientFactory   PrivacyClientFactory               // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
-	refreshFailureRecorder CredentialOperationRefreshRecorder // wired before serving
-	refreshRecorderMu      sync.RWMutex
+	proxyOwnerRefreshAPI      *OAuthRefreshAPI
+	proxyOwnerRefreshExecutor OAuthRefreshExecutor
+	sessionStore              *openai.SessionStore
+	proxyRepo                 ProxyRepository
+	oauthClient               OpenAIOAuthClient
+	privacyClientFactory      PrivacyClientFactory               // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
+	refreshFailureRecorder    CredentialOperationRefreshRecorder // wired before serving
+	refreshRecorderMu         sync.RWMutex
 }
 
 func (s *OpenAIOAuthService) SetRefreshFailureRecorder(recorder CredentialOperationRefreshRecorder) {
@@ -373,6 +375,28 @@ func resolveChatGPTSubscriptionAccountID(tokenInfo *OpenAITokenInfo, orgID strin
 
 // RefreshAccountToken refreshes token for an OpenAI OAuth account
 func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *Account) (*OpenAITokenInfo, error) {
+	if account.IsProxyReplica() {
+		return nil, infraerrors.BadRequest("PROXY_REPLICA_NO_REFRESH", "refresh the credential owner account")
+	}
+	if account.IsProxyReplicaSource() && ctx.Value(proxyOwnerRefreshContextKey{}) != true {
+		if s.proxyOwnerRefreshAPI == nil || s.proxyOwnerRefreshExecutor == nil {
+			return nil, infraerrors.New(503, "OWNER_REFRESH_UNAVAILABLE", "credential owner refresh coordinator unavailable")
+		}
+		result, err := s.proxyOwnerRefreshAPI.RefreshIfNeeded(ctx, account, s.proxyOwnerRefreshExecutor, openAITokenRefreshSkew)
+		if err != nil {
+			return nil, err
+		}
+		if result == nil || result.Account == nil || result.LockHeld {
+			return nil, infraerrors.Conflict("OWNER_REFRESH_IN_PROGRESS", "credential owner refresh in progress; retry")
+		}
+		fresh := result.Account
+		info := &OpenAITokenInfo{AccessToken: fresh.GetCredential("access_token"), RefreshToken: fresh.GetCredential("refresh_token"), IDToken: fresh.GetCredential("id_token"), ClientID: fresh.GetCredential("client_id"), Email: fresh.GetCredential("email"), ChatGPTAccountID: fresh.GetCredential("chatgpt_account_id"), ChatGPTUserID: fresh.GetCredential("chatgpt_user_id"), OrganizationID: fresh.GetCredential("organization_id"), PlanType: fresh.GetCredential("plan_type")}
+		if expires := fresh.GetCredentialAsTime("expires_at"); expires != nil {
+			info.ExpiresAt = expires.Unix()
+			info.ExpiresIn = int64(time.Until(*expires).Seconds())
+		}
+		return info, nil
+	}
 	if account.Platform != PlatformOpenAI {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_ACCOUNT", "account is not an OpenAI account")
 	}

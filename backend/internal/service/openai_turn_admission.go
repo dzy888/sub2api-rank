@@ -263,6 +263,22 @@ func (s *OpenAIGatewayService) latestOpenAITurnAccountForGroup(
 		// providers which share the generic forwarding implementation.
 		return selected, nil
 	}
+	if s.schedulerSnapshot == nil || s.schedulerSnapshot.localSnapshotReader == nil {
+		// A previously cached normal account can become a credential-only owner.
+		// Consult this small primary-DB fence even when its old admission snapshot
+		// predates the replica operation; never grant an additional direct entry.
+		if guard, ok := s.accountRepo.(interface {
+			IsProxyReplicaSourceID(context.Context, int64) (bool, error)
+		}); ok {
+			ownerOnly, err := guard.IsProxyReplicaSourceID(ctx, selected.ID)
+			if err != nil {
+				return nil, denyOpenAITurn("latest_state_unavailable")
+			}
+			if ownerOnly {
+				return nil, denyOpenAITurn("credential_owner_only")
+			}
+		}
+	}
 	latest := selected
 	var parent *Account
 	authoritativeRead := false
@@ -277,7 +293,7 @@ func (s *OpenAIGatewayService) latestOpenAITurnAccountForGroup(
 		}
 		authoritativeRead = true
 	} else {
-		if ttl := s.openAITurnAdmissionCacheTTL(); ttl > 0 {
+		if ttl := s.openAITurnAdmissionCacheTTL(); ttl > 0 && !selected.IsProxyReplica() && !selected.IsProxyReplicaSource() {
 			if cached, cachedParent, ok := s.openAITurnAdmissionCache.load(selected.ID, ttl); ok {
 				latest, parent, authoritativeRead = cached, cachedParent, true
 			}
@@ -338,6 +354,17 @@ func (s *OpenAIGatewayService) latestOpenAITurnAccountForGroup(
 	}
 	if authoritativeRead && !latest.IsSchedulable() {
 		return nil, denyOpenAITurn("account_ineligible")
+	}
+	if latest.IsProxyReplica() {
+		if !ProxyReplicaOwnerUsable(parent, time.Now()) {
+			return nil, denyOpenAITurn("credential_owner_ineligible")
+		}
+		if paused, _ := shouldAutoPauseOpenAIAccountByQuota(ctx, parent); paused {
+			return nil, denyOpenAITurn("credential_owner_quota_exceeded")
+		}
+		if latest.ProxyID == nil || latest.Proxy == nil || !latest.Proxy.IsActive() || latest.Proxy.IsExpired(time.Now()) {
+			return nil, denyOpenAITurn("replica_proxy_ineligible")
+		}
 	}
 	if authoritativeRead && latest.IsShadow() && (parent == nil || parent.IsShadow() ||
 		!parent.IsOpenAIOAuth() || !parent.IsCredentialUsableForShadow()) {

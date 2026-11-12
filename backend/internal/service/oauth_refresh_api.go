@@ -189,8 +189,18 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	if account == nil {
 		return nil, errors.New("oauth refresh account is nil")
 	}
+	if account.IsProxyReplica() {
+		var err error
+		account, err = ResolveProxyReplicaOwner(ctx, api.accountRepo, account)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if executor == nil {
 		return nil, errors.New("oauth refresh executor is nil")
+	}
+	if account.IsProxyReplicaSource() && api.tokenCache == nil {
+		return nil, errors.New("credential owner distributed refresh lock unavailable")
 	}
 	requestPath := isOAuthRefreshRequestPath(ctx)
 	cacheKey := executor.CacheKey(account)
@@ -203,9 +213,13 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	defer localMu.Unlock()
 
 	// 1. 获取分布式锁
+	ownerLockHeld := false
 	if api.tokenCache != nil {
 		acquired, lockErr := api.tokenCache.AcquireRefreshLock(ctx, cacheKey, api.lockTTL)
 		if lockErr != nil {
+			if account.IsProxyReplicaSource() {
+				return nil, errors.New("credential owner refresh lock unavailable")
+			}
 			// Redis 错误，降级为无锁刷新（进程内互斥锁仍生效）
 			slog.Warn("oauth_refresh_lock_failed_degraded",
 				"account_id", account.ID,
@@ -216,6 +230,7 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 			// 锁被其他 worker 持有
 			return &OAuthRefreshResult{LockHeld: true}, nil
 		} else {
+			ownerLockHeld = true
 			defer api.releaseRefreshLock(ctx, cacheKey)
 		}
 	}
@@ -236,6 +251,9 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	}
 	if freshAccount.ID != account.ID {
 		return nil, fmt.Errorf("%w: account identity mismatch", errOAuthRefreshAccountRereadFailed)
+	}
+	if freshAccount.IsProxyReplicaSource() && !ownerLockHeld {
+		return nil, errors.New("credential owner distributed refresh lock unavailable")
 	}
 	if !freshAccount.IsActive() {
 		if requestPath {
@@ -267,7 +285,7 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 
 	// 4. 执行平台特定刷新逻辑
 	attemptedAccount := snapshotOAuthRefreshAccount(freshAccount)
-	newCredentials, refreshErr := executor.Refresh(ctx, freshAccount)
+	newCredentials, refreshErr := executor.Refresh(context.WithValue(ctx, proxyOwnerRefreshContextKey{}, true), freshAccount)
 	if ctxErr := refreshContextErr(ctx); ctxErr != nil {
 		// A provider implementation may ignore cancellation and return late
 		// credentials. Never persist them after the attempt/cycle boundary.

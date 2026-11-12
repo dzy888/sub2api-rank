@@ -884,7 +884,7 @@ func (s *AccountTokenGuardService) listAccounts(ctx context.Context, cfg Account
 	seen := map[int64]bool{}
 	out := make([]Account, 0, 32)
 	appendAccount := func(account Account) {
-		if seen[account.ID] || managed[account.ID] || !account.IsOAuth() || account.Platform != PlatformOpenAI || account.IsShadow() ||
+		if seen[account.ID] || managed[account.ID] || !account.IsOAuth() || account.Platform != PlatformOpenAI || account.IsShadow() || account.IsProxyReplica() ||
 			(account.Status != StatusActive && account.Status != StatusError) {
 			return
 		}

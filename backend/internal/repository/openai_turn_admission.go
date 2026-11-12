@@ -33,6 +33,12 @@ func (r *accountRepository) GetOpenAITurnAdmission(ctx context.Context, id int64
 		return nil, nil, err
 	}
 	var parent *service.Account
+	if account.IsProxyReplica() {
+		parent, err = reader.getOpenAITurnAdmissionAccount(ctx, account.CredentialOwnerAccountID())
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	if account.IsShadow() {
 		parent, err = reader.getOpenAITurnAdmissionAccount(ctx, *account.ParentAccountID)
 		if err != nil {
