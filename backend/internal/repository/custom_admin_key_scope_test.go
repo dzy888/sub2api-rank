@@ -43,6 +43,9 @@ func TestScopedAdminAccountListScopesCountAndPageInSQL(t *testing.T) {
 			}
 			// 允许模型映射子字段投影，禁止读取完整 credentials。
 			projected := strings.ReplaceAll(actual, `"accounts"."credentials"->'model_mapping' AS model_mapping`, "model_mapping")
+			for _, key := range []string{"credential_owner_account_id", "openai_oauth_responses_websockets_v2_mode", "openai_oauth_responses_websockets_v2_enabled"} {
+				projected = strings.ReplaceAll(projected, `"accounts"."extra"->'`+key+`'`, "safe_projection")
+			}
 			if strings.Contains(projected, `"credentials"`) || strings.Contains(projected, `"extra"`) {
 				return fmt.Errorf("读取了敏感字段")
 			}
@@ -97,8 +100,12 @@ func TestScopedAdminAccountListPostgresRulesAndPagination(t *testing.T) {
 	_, err = db.Exec(`CREATE TABLE accounts (
 		id BIGINT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', notes TEXT, platform TEXT NOT NULL,
 		type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', schedulable BOOLEAN NOT NULL DEFAULT true,
-		concurrency INT NOT NULL DEFAULT 1, priority INT NOT NULL DEFAULT 1, credentials JSONB DEFAULT '{}', deleted_at TIMESTAMPTZ
+		concurrency INT NOT NULL DEFAULT 1, priority INT NOT NULL DEFAULT 1, credentials JSONB DEFAULT '{}', extra JSONB DEFAULT '{}', deleted_at TIMESTAMPTZ,
+		proxy_id BIGINT,parent_account_id BIGINT,load_factor INT,expires_at TIMESTAMPTZ,auto_pause_on_expired BOOLEAN DEFAULT true,
+		rate_limited_at TIMESTAMPTZ,rate_limit_reset_at TIMESTAMPTZ,overload_until TIMESTAMPTZ,temp_unschedulable_until TIMESTAMPTZ,error_message TEXT
 	);
+	CREATE TABLE groups(id BIGINT PRIMARY KEY,status TEXT DEFAULT 'active',deleted_at TIMESTAMPTZ);
+	INSERT INTO groups(id) VALUES(1),(2);
 	CREATE TABLE account_groups(account_id BIGINT, group_id BIGINT, priority INT DEFAULT 50, allowed_models JSONB, created_at TIMESTAMPTZ DEFAULT NOW());
 	INSERT INTO accounts(id,platform,type) VALUES
 	(1,'openai','oauth'), (2,'openai','apikey'), (3,'openai','oauth'),

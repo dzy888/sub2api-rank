@@ -18,7 +18,7 @@ import (
 )
 
 func scopedAdminGroupModelsDTO(g *service.Group) gin.H {
-	return gin.H{"id": g.ID, "name": g.Name, "platform": g.Platform, "model_allowlist": g.ModelAllowlist}
+	return gin.H{"id": g.ID, "name": g.Name, "platform": g.Platform, "status": g.Status, "model_allowlist": g.ModelAllowlist}
 }
 
 // ScopedAdminKeyGroupModels 接管分组模型接口，禁止复用可修改费率等字段的完整处理器。

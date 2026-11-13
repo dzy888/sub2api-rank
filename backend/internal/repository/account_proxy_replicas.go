@@ -4,16 +4,71 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	dbaccount "github.com/Wei-Shaw/sub2api/ent/account"
 	dbproxy "github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 var _ service.ProxyReplicaRepository = (*accountRepository)(nil)
+
+func (r *accountRepository) AuthorizeProxyReplicaOwnerWrite(ctx context.Context, id int64, permissions []string) error {
+	if scoped := r.accountTransactionScope(ctx); scoped != r {
+		return scoped.AuthorizeProxyReplicaOwnerWrite(ctx, id, permissions)
+	}
+	if adminaccess.FromContext(ctx) == nil {
+		return nil
+	}
+	if err := proxyRecoveryLock(ctx, r.client, `SELECT id FROM accounts WHERE id=$1 OR (extra ? 'credential_owner_account_id' AND extra->>'credential_owner_account_id'=$2) ORDER BY id FOR UPDATE`, id, sourceIDString(id)); err != nil {
+		return err
+	}
+	var resources []adminaccess.Account
+	if err := proxyRecoveryJSON(ctx, r.client, `SELECT coalesce(jsonb_agg(jsonb_build_object('ID',id,'Platform',platform,'Type',type,
+	'GroupIDs',coalesce((SELECT jsonb_agg(group_id) FROM account_groups WHERE account_id=accounts.id),'[]'))),'[]')
+	FROM accounts WHERE id=$1 OR (extra ? 'credential_owner_account_id' AND extra->>'credential_owner_account_id'=$2 AND deleted_at IS NULL)`, &resources, id, sourceIDString(id)); err != nil {
+		return err
+	}
+	principal := adminaccess.FromContext(ctx)
+	for _, a := range resources {
+		for _, permission := range permissions {
+			if !principal.Policy.AllowsAccountAndGroups(permission, a) {
+				return infraerrors.Forbidden("SCOPED_ACCOUNT_FORBIDDEN", "关联代理副本或分组未授权")
+			}
+		}
+	}
+	return nil
+}
+
+func (r *accountRepository) authorizeStoredReplicaScope(ctx context.Context, permission string, sourceID int64, key string) error {
+	if adminaccess.FromContext(ctx) == nil {
+		return nil
+	}
+	if err := proxyRecoveryLock(ctx, r.client, `SELECT id FROM accounts WHERE id=$1 OR id IN
+	(SELECT account_id FROM account_proxy_replica_items WHERE operation_id=$2) ORDER BY id FOR UPDATE`, sourceID, key); err != nil {
+		return err
+	}
+	var resources []adminaccess.Account
+	err := proxyRecoveryJSON(ctx, r.client, `SELECT coalesce(jsonb_agg(jsonb_build_object('ID',a.id,'Type',a.type,'Platform',a.platform,
+	'GroupIDs',coalesce((SELECT jsonb_agg(group_id ORDER BY group_id) FROM account_groups WHERE account_id=a.id),'[]'))),'[]')
+	FROM accounts a WHERE a.id=$1 OR a.id IN(SELECT account_id FROM account_proxy_replica_items WHERE operation_id=$2)`, &resources, sourceID, key)
+	if err != nil {
+		return err
+	}
+	if len(resources) == 0 {
+		return recoveryHidden()
+	}
+	for _, a := range resources {
+		if !recoveryAllowed(ctx, permission, a) {
+			return recoveryHidden()
+		}
+	}
+	return nil
+}
 
 func (r *accountRepository) IsProxyReplicaSourceID(ctx context.Context, id int64) (bool, error) {
 	rows, err := r.client.QueryContext(ctx, `SELECT EXISTS(SELECT 1 FROM accounts WHERE id=$1 AND extra->>'proxy_replica_source'='true')`, id)
@@ -80,6 +135,9 @@ func (r *accountRepository) CreateProxyReplicas(ctx context.Context, sourceID in
 		return nil, infraerrors.Conflict("PROXY_REPLICA_OPERATION_CONFLICT", "operation ID already has different configuration")
 	}
 	scoped := &accountRepository{client: client, sql: client}
+	if err := scoped.authorizeStoredReplicaScope(ctx, "accounts.proxy_replicas.create", sourceID, key); err != nil {
+		return nil, err
+	}
 	if completed {
 		result, err := scoped.GetProxyReplicaOperation(ctx, sourceID, key)
 		if err != nil {
@@ -110,6 +168,13 @@ func (r *accountRepository) CreateProxyReplicas(ctx context.Context, sourceID in
 	}
 	source = &hydrated[0]
 	groups := append([]service.AccountGroup(nil), source.AccountGroups...)
+	if principal := adminaccess.FromContext(ctx); principal != nil {
+		resource := adminaccess.Account{ID: source.ID, GroupIDs: source.GroupIDs, Type: source.Type, Platform: source.Platform}
+		if !slices.Contains(principal.Policy.GlobalPermissions, "proxies.read") ||
+			!principal.Policy.AllowsAccountAndGroups("accounts.proxy_replicas.create", resource) {
+			return nil, infraerrors.NotFound("PROXY_REPLICA_SOURCE_NOT_FOUND", "proxy replica source account not found")
+		}
+	}
 	if err := lockLiveGroups(ctx, client, source.GroupIDs); err != nil {
 		return nil, err
 	}

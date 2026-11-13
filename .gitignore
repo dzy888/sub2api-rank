@@ -240,3 +240,4 @@ issues/
 tools/local-worker/
 
 !docs/key-risk-patrol.md
+!docs/scoped-proxy-recovery.md

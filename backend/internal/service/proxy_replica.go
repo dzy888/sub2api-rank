@@ -5,11 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
@@ -100,22 +103,148 @@ func (s *adminServiceImpl) CreateProxyReplicas(ctx context.Context, id int64, ke
 	if err != nil {
 		return nil, err
 	}
-	repo, ok := s.accountRepo.(ProxyReplicaRepository)
-	if !ok {
-		return nil, infraerrors.New(503, "PROXY_REPLICAS_UNAVAILABLE", "proxy replica repository unavailable")
-	}
-	return repo.CreateProxyReplicas(ctx, id, key, in, hash)
-}
-
-func (s *adminServiceImpl) GetProxyReplicaOperation(ctx context.Context, id int64, key string) (*ProxyReplicaOperation, error) {
-	if err := ValidateProxyReplicaOperationKey(key); err != nil {
+	if err := s.authorizeProxyReplicaRequest(ctx, "accounts.proxy_replicas.create", id, in.Proxies); err != nil {
 		return nil, err
 	}
 	repo, ok := s.accountRepo.(ProxyReplicaRepository)
 	if !ok {
 		return nil, infraerrors.New(503, "PROXY_REPLICAS_UNAVAILABLE", "proxy replica repository unavailable")
 	}
-	return repo.GetProxyReplicaOperation(ctx, id, key)
+	operation, err := repo.CreateProxyReplicas(ctx, id, key, in, hash)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeProxyReplicaOperation(ctx, "accounts.proxy_replicas.create", id, key, operation); err != nil {
+		return nil, err
+	}
+	return operation, nil
+}
+
+func (s *adminServiceImpl) GetProxyReplicaOperation(ctx context.Context, id int64, key string) (*ProxyReplicaOperation, error) {
+	if err := ValidateProxyReplicaOperationKey(key); err != nil {
+		return nil, err
+	}
+	if err := s.authorizeProxyReplicaRequest(ctx, "accounts.proxy_replicas.read", id, nil); err != nil {
+		return nil, err
+	}
+	repo, ok := s.accountRepo.(ProxyReplicaRepository)
+	if !ok {
+		return nil, infraerrors.New(503, "PROXY_REPLICAS_UNAVAILABLE", "proxy replica repository unavailable")
+	}
+	operation, err := repo.GetProxyReplicaOperation(ctx, id, key)
+	if err != nil || operation == nil {
+		return operation, err
+	}
+	if err := s.authorizeProxyReplicaOperation(ctx, "accounts.proxy_replicas.read", id, key, operation); err != nil {
+		return nil, err
+	}
+	return operation, nil
+}
+
+func (s *adminServiceImpl) authorizeProxyReplicaOperation(ctx context.Context, permission string, sourceID int64, key string, operation *ProxyReplicaOperation) error {
+	principal := adminaccess.FromContext(ctx)
+	if principal == nil {
+		return nil
+	}
+	if operation == nil || operation.OperationID != key || operation.SourceAccountID != sourceID {
+		return infraerrors.NotFound("PROXY_REPLICA_OPERATION_NOT_FOUND", "proxy replica operation not found")
+	}
+	ids := make([]int64, 0, len(operation.Replicas))
+	for _, replica := range operation.Replicas {
+		resource := adminaccess.Account{ID: replica.AccountID, GroupIDs: replica.GroupIDs, Type: AccountTypeOAuth, Platform: PlatformOpenAI}
+		if replica.AccountID > 0 && !principal.Policy.AllowsAccountAndGroups(permission, resource) {
+			return infraerrors.NotFound("PROXY_REPLICA_OPERATION_NOT_FOUND", "proxy replica operation not found")
+		}
+		if replica.Status != "deleted" && replica.AccountID > 0 {
+			ids = append(ids, replica.AccountID)
+		}
+	}
+	accounts, err := s.accountRepo.GetByIDs(ctx, ids)
+	if err != nil {
+		return infraerrors.New(503, "PROXY_REPLICAS_UNAVAILABLE", "proxy replica lookup unavailable")
+	}
+	byID := make(map[int64]*Account, len(accounts))
+	for _, account := range accounts {
+		if account != nil {
+			byID[account.ID] = account
+		}
+	}
+	for _, replica := range operation.Replicas {
+		if replica.Status == "deleted" || replica.AccountID <= 0 {
+			continue
+		}
+		account := byID[replica.AccountID]
+		if account == nil || account.CredentialOwnerAccountID() != sourceID || account.ProxyID == nil || *account.ProxyID != replica.ProxyID ||
+			account.Extra[ProxyReplicaOperationKey] != key {
+			return infraerrors.NotFound("PROXY_REPLICA_OPERATION_NOT_FOUND", "proxy replica operation not found")
+		}
+		resource := adminaccess.Account{ID: account.ID, GroupIDs: account.GroupIDs, Type: account.Type, Platform: account.Platform}
+		currentGroups := append([]int64{}, account.GroupIDs...)
+		slices.Sort(currentGroups)
+		returnedGroups := append([]int64{}, replica.GroupIDs...)
+		slices.Sort(returnedGroups)
+		if !slices.Equal(currentGroups, returnedGroups) || !principal.Policy.AllowsAccountAndGroups(permission, resource) {
+			return infraerrors.NotFound("PROXY_REPLICA_OPERATION_NOT_FOUND", "proxy replica operation not found")
+		}
+	}
+	return nil
+}
+
+// authorizeProxyReplicaRequest enforces resource scope after route-level
+// permission matching. A rule that matches one group must not grant access to
+// a source account's other groups, and proxy selection still requires the
+// explicit global proxies.read permission.
+func (s *adminServiceImpl) authorizeProxyReplicaRequest(ctx context.Context, permission string, sourceID int64, inputs []ProxyReplicaInput) error {
+	principal := adminaccess.FromContext(ctx)
+	if principal == nil {
+		return nil
+	}
+	if !slices.Contains(principal.Policy.GlobalPermissions, "proxies.read") {
+		return infraerrors.Forbidden("PROXY_REPLICAS_PROXY_READ_REQUIRED", "proxy replica access requires proxies.read")
+	}
+	if sourceID <= 0 || s.accountRepo == nil {
+		return infraerrors.NotFound("PROXY_REPLICA_SOURCE_NOT_FOUND", "proxy replica source account not found")
+	}
+	account, err := s.accountRepo.GetByID(ctx, sourceID)
+	if err != nil && !errors.Is(err, ErrAccountNotFound) {
+		return infraerrors.New(503, "PROXY_REPLICAS_UNAVAILABLE", "source lookup unavailable")
+	}
+	if err != nil || account == nil {
+		return infraerrors.NotFound("PROXY_REPLICA_SOURCE_NOT_FOUND", "proxy replica source account not found")
+	}
+	resource := adminaccess.Account{ID: account.ID, GroupIDs: account.GroupIDs, Type: account.Type, Platform: account.Platform}
+	if !principal.Policy.AllowsAccount(permission, resource) {
+		return infraerrors.NotFound("PROXY_REPLICA_SOURCE_NOT_FOUND", "proxy replica source account not found")
+	}
+	for _, groupID := range account.GroupIDs {
+		if !principal.Policy.AllowsGroup(permission, resource, groupID) {
+			return infraerrors.NotFound("PROXY_REPLICA_SOURCE_NOT_FOUND", "proxy replica source account not found")
+		}
+	}
+	if len(inputs) == 0 {
+		return nil
+	}
+	if s.proxyRepo == nil {
+		return infraerrors.New(503, "PROXY_REPLICAS_PROXY_READ_UNAVAILABLE", "proxy lookup unavailable")
+	}
+	ids := make([]int64, 0, len(inputs))
+	for _, input := range inputs {
+		ids = append(ids, input.ProxyID)
+	}
+	proxies, err := s.proxyRepo.ListByIDs(ctx, ids)
+	if err != nil {
+		return infraerrors.New(503, "PROXY_REPLICAS_PROXY_READ_UNAVAILABLE", "proxy lookup unavailable")
+	}
+	seen := make(map[int64]struct{}, len(proxies))
+	for _, proxy := range proxies {
+		seen[proxy.ID] = struct{}{}
+	}
+	for _, id := range ids {
+		if _, ok := seen[id]; !ok {
+			return infraerrors.NotFound("PROXY_REPLICA_PROXY_NOT_FOUND", "proxy not found")
+		}
+	}
+	return nil
 }
 
 func (a *Account) CredentialOwnerAccountID() int64 {

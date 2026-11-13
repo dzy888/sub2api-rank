@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
@@ -15,6 +16,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 )
 
 func (r *accountRepository) ScopedAdminList(ctx context.Context, p pagination.PaginationParams, platform, kind, status, search string) ([]service.Account, int64, error) {
@@ -33,31 +35,54 @@ func (r *accountRepository) ScopedAdminList(ctx context.Context, p pagination.Pa
 	}
 	// SQL 只投影模型映射子字段，不加载 Token、API Key、接入地址或其他凭证。
 	var rows []struct {
-		ID           int64
-		Name         string
-		Notes        *string
-		Platform     string
-		Type         string
-		Status       string
-		Schedulable  bool
-		Concurrency  int
-		Priority     int
-		ModelMapping json.RawMessage `json:"model_mapping"`
+		ID                     int64
+		Name                   string
+		Notes                  *string
+		Platform               string
+		Type                   string
+		Status                 string
+		Schedulable            bool
+		Concurrency            int
+		Priority               int
+		ProxyID                *int64          `json:"proxy_id"`
+		ParentAccountID        *int64          `json:"parent_account_id"`
+		LoadFactor             *int            `json:"load_factor"`
+		ExpiresAt              *time.Time      `json:"expires_at"`
+		AutoPauseOnExpired     bool            `json:"auto_pause_on_expired"`
+		RateLimitedAt          *time.Time      `json:"rate_limited_at"`
+		RateLimitResetAt       *time.Time      `json:"rate_limit_reset_at"`
+		OverloadUntil          *time.Time      `json:"overload_until"`
+		TempUnschedulableUntil *time.Time      `json:"temp_unschedulable_until"`
+		ErrorMessage           *string         `json:"error_message"`
+		OwnerID                json.RawMessage `json:"owner_id"`
+		NetworkExtra           json.RawMessage `json:"network_extra"`
+		ModelMapping           json.RawMessage `json:"model_mapping"`
 	}
 	err = q.Offset(p.Offset()).Limit(p.Limit()).Order(dbaccount.ByID()).
-		Select(dbaccount.FieldID, dbaccount.FieldName, dbaccount.FieldNotes, dbaccount.FieldPlatform, dbaccount.FieldType, dbaccount.FieldStatus, dbaccount.FieldSchedulable, dbaccount.FieldConcurrency, dbaccount.FieldPriority).
+		Select(dbaccount.FieldID, dbaccount.FieldName, dbaccount.FieldNotes, dbaccount.FieldPlatform, dbaccount.FieldType, dbaccount.FieldStatus, dbaccount.FieldSchedulable, dbaccount.FieldConcurrency, dbaccount.FieldPriority,
+			dbaccount.FieldProxyID, dbaccount.FieldParentAccountID, dbaccount.FieldLoadFactor, dbaccount.FieldExpiresAt, dbaccount.FieldAutoPauseOnExpired,
+			dbaccount.FieldRateLimitedAt, dbaccount.FieldRateLimitResetAt, dbaccount.FieldOverloadUntil, dbaccount.FieldTempUnschedulableUntil, dbaccount.FieldErrorMessage).
 		Aggregate(func(s *entsql.Selector) string {
 			return s.C(dbaccount.FieldCredentials) + "->'model_mapping' AS model_mapping"
+		}, func(s *entsql.Selector) string {
+			return s.C(dbaccount.FieldExtra) + "->'credential_owner_account_id' AS owner_id"
+		}, func(s *entsql.Selector) string {
+			column := s.C(dbaccount.FieldExtra)
+			return "jsonb_build_object('openai_oauth_responses_websockets_v2_mode'," + column + "->'openai_oauth_responses_websockets_v2_mode','openai_oauth_responses_websockets_v2_enabled'," + column + "->'openai_oauth_responses_websockets_v2_enabled') AS network_extra"
 		}).Scan(ctx, &rows)
 	if err != nil {
 		return nil, 0, err
 	}
 	accounts := make([]service.Account, 0, len(rows))
+	ids := make([]int64, 0, len(rows))
 	for _, row := range rows {
-		groups, e := r.loadAccountGroupIDs(ctx, row.ID)
-		if e != nil {
-			return nil, 0, e
-		}
+		ids = append(ids, row.ID)
+	}
+	groupsByAccount, groupIDsByAccount, err := r.scopedMonitorGroups(ctx, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, row := range rows {
 		var rawMapping map[string]any
 		mapping := map[string]string{}
 		if json.Unmarshal(row.ModelMapping, &rawMapping) == nil {
@@ -71,9 +96,43 @@ func (r *accountRepository) ScopedAdminList(ctx context.Context, p pagination.Pa
 		if len(mapping) > 0 {
 			credentials = map[string]any{"model_mapping": mapping}
 		}
-		accounts = append(accounts, service.Account{ID: row.ID, Name: row.Name, Notes: row.Notes, Platform: row.Platform, Type: row.Type, Status: row.Status, Schedulable: row.Schedulable, Concurrency: row.Concurrency, Priority: row.Priority, GroupIDs: groups, Credentials: credentials})
+		extra := map[string]any{}
+		_ = json.Unmarshal(row.NetworkExtra, &extra)
+		var ownerID int64
+		if json.Unmarshal(row.OwnerID, &ownerID) == nil && ownerID > 0 {
+			extra[service.CredentialOwnerAccountIDKey] = ownerID
+		}
+		accounts = append(accounts, service.Account{ID: row.ID, Name: row.Name, Notes: row.Notes, Platform: row.Platform, Type: row.Type, Status: row.Status, Schedulable: row.Schedulable, Concurrency: row.Concurrency, Priority: row.Priority,
+			GroupIDs: groupIDsByAccount[row.ID], Groups: groupsByAccount[row.ID], Credentials: credentials, Extra: extra,
+			ProxyID: row.ProxyID, ParentAccountID: row.ParentAccountID, LoadFactor: row.LoadFactor, ExpiresAt: row.ExpiresAt, AutoPauseOnExpired: row.AutoPauseOnExpired,
+			RateLimitedAt: row.RateLimitedAt, RateLimitResetAt: row.RateLimitResetAt, OverloadUntil: row.OverloadUntil, TempUnschedulableUntil: row.TempUnschedulableUntil,
+			ErrorMessage: derefString(row.ErrorMessage)})
 	}
 	return accounts, int64(total), nil
+}
+
+func (r *accountRepository) scopedMonitorGroups(ctx context.Context, ids []int64) (map[int64][]*service.Group, map[int64][]int64, error) {
+	groups := map[int64][]*service.Group{}
+	groupIDs := map[int64][]int64{}
+	if len(ids) == 0 {
+		return groups, groupIDs, nil
+	}
+	rows, err := r.client.QueryContext(ctx, `SELECT ag.account_id,ag.group_id,CASE WHEN g.id IS NULL OR g.deleted_at IS NOT NULL THEN 'deleted' ELSE g.status END
+	FROM account_groups ag LEFT JOIN groups g ON g.id=ag.group_id WHERE ag.account_id=ANY($1) ORDER BY ag.account_id,ag.group_id`, pq.Array(ids))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var accountID, groupID int64
+		var status string
+		if err = rows.Scan(&accountID, &groupID, &status); err != nil {
+			return nil, nil, err
+		}
+		groupIDs[accountID] = append(groupIDs[accountID], groupID)
+		groups[accountID] = append(groups[accountID], &service.Group{ID: groupID, Status: status})
+	}
+	return groups, groupIDs, rows.Err()
 }
 
 // ScopedAdminCommitted 提交后按实际操作删除或更新缓存，避免对已删除账户读取快照。

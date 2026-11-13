@@ -85,6 +85,20 @@ func (p Policy) AllowsAccount(permission string, a Account) bool {
 	return false
 }
 
+// AllowsAccountAndGroups requires permission for the account and every group
+// whose configuration or membership the operation can affect.
+func (p Policy) AllowsAccountAndGroups(permission string, a Account) bool {
+	if !p.AllowsAccount(permission, a) {
+		return false
+	}
+	for _, groupID := range a.GroupIDs {
+		if !p.AllowsGroup(permission, a, groupID) {
+			return false
+		}
+	}
+	return true
+}
+
 // AllowsGroup 只有当前账户及目标分组在同一授权规则内，才能调整该关联。
 func (p Policy) AllowsGroup(permission string, a Account, groupID int64) bool {
 	if groupID <= 0 {

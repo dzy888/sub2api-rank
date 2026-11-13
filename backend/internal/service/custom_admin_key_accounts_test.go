@@ -28,6 +28,22 @@ func TestScopedAdminAccountFieldsRejectUnknown(t *testing.T) {
 	}
 }
 
+func TestScopedAdminWSFieldsRequireNetworkAndNeverAllowOwnership(t *testing.T) {
+	for _, body := range []string{`{"extra":{"openai_oauth_responses_websockets_v2_mode":"ctx_pool"}}`, `{"extra":{"openai_oauth_responses_websockets_v2_enabled":false}}`} {
+		var fields map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal([]byte(body), &fields))
+		permissions, err := scopedAccountFieldPermissions(fields, false)
+		require.NoError(t, err)
+		require.Equal(t, []string{"accounts.network"}, permissions)
+	}
+	for _, body := range []string{`{"extra":{"credential_owner_account_id":1}}`, `{"extra":{"proxy_replica_source":true}}`, `{"extra":{"openai_oauth_responses_websockets_v2_mode":"bad"}}`, `{"extra":{"openai_oauth_responses_websockets_v2_enabled":"true"}}`} {
+		var fields map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal([]byte(body), &fields))
+		_, err := scopedAccountFieldPermissions(fields, false)
+		require.Equal(t, 400, infraerrors.Code(err))
+	}
+}
+
 func TestScopedAdminAccountModelMappingFieldPermissions(t *testing.T) {
 	for _, create := range []bool{false, true} {
 		for _, mapping := range []string{`{"gpt-6":"gpt-6","alias":"gpt-6"}`, `{}`, `null`} {

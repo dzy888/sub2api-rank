@@ -6,7 +6,9 @@
 
 ## 权限与请求
 
-仅完整管理员身份可访问，支持现有管理员会话和全权限管理员 API Key。普通用户、观察员和受限管理员 Key 均不能调用。没有新增用户侧功能。
+支持完整管理员身份和显式授权的受限管理员 Key；普通用户及观察员拒绝。受限 Key 需分别授予 `accounts.proxy_replicas.read` / `accounts.proxy_replicas.create`，并授予全站 `proxies.read`。创建权限包含请求中的代理、并发、WS 和 `activate_on_success` 激活行为。
+
+源账号、已有副本和全部受影响分组必须在对应权限的授权范围内；仅覆盖其中一个共享分组不够。当前 `proxies.read` 是全站代理候选权限，不存在按代理 ID 单独授权的策略；响应仍不返回代理密码。操作 ID 持久绑定源账号与完整配置，不能跨账号查询、重用或修改。
 
 ```http
 POST /api/v1/admin/accounts/123/proxy-replicas
@@ -71,6 +73,8 @@ GET /api/v1/admin/accounts/123/proxy-replicas/harbor-example-operation
 ```
 
 GET 返回同一种 `data`，只读，不创建或启用账号；源账号删除后仍可查询原操作。恢复通过再次 POST **相同操作编号和相同请求配置** 完成。
+
+这里的重试只补未完成的创建事务。认证失效后的调度恢复使用下述独立协议，已完成创建的重放不会重新开启副本。
 
 | 状态 | 含义 |
 | --- | --- |

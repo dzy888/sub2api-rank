@@ -45,6 +45,12 @@ func scopedAccountFieldPermissions(fields map[string]json.RawMessage, create boo
 			permission = "accounts.schedule"
 		case "proxy_id", "proxy_mode", "random_proxy":
 			permission = "accounts.network"
+		case "extra":
+			var extra map[string]any
+			if json.Unmarshal(raw, &extra) != nil || len(extra) == 0 || validateScopedNetworkExtra(extra) != nil {
+				return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_FIELD", "仅开放 WS 连接配置")
+			}
+			permission = "accounts.network"
 		case "group_ids":
 			permission = "accounts.groups"
 		case "platform", "type":
@@ -78,7 +84,7 @@ func scopedAccountFieldPermissions(fields map[string]json.RawMessage, create boo
 					return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_CREDENTIALS", "凭证值格式无效")
 				}
 				switch name {
-				case "api_key", "access_token", "refresh_token", "id_token", "session_key":
+				case "api_key", "access_token", "refresh_token", "id_token", "session_key", "email", "chatgpt_account_id", "chatgpt_user_id", "organization_id", "plan_type", "expires_at":
 					permissions = append(permissions, "accounts.credentials")
 				case "base_url":
 					permissions = append(permissions, "accounts.network")
@@ -131,6 +137,7 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 			Platform    string         `json:"platform"`
 			Type        string         `json:"type"`
 			Credentials map[string]any `json:"credentials"`
+			Extra       map[string]any `json:"extra"`
 			GroupIDs    []int64        `json:"group_ids"`
 			Concurrency int            `json:"concurrency"`
 			Priority    int            `json:"priority"`
@@ -170,7 +177,10 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 		if e != nil {
 			return nil, e
 		}
-		return s.scopedAdminCreateTransaction(ctx, &CreateAccountInput{ProxyID: input.ProxyID, ProxyMode: proxyMode, Name: input.Name, Notes: input.Notes, Platform: input.Platform, Type: input.Type, Credentials: input.Credentials, GroupIDs: input.GroupIDs, Concurrency: input.Concurrency, Priority: input.Priority, LoadFactor: input.LoadFactor, ExpiresAt: input.ExpiresAt, AutoPauseOnExpired: input.AutoPause, SkipDefaultGroupBind: true})
+		if len(input.Extra) > 0 && (input.Platform != PlatformOpenAI || input.Type != AccountTypeOAuth) {
+			return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_FIELD", "WS 配置仅适用于 OpenAI OAuth")
+		}
+		return s.scopedAdminCreateTransaction(ctx, &CreateAccountInput{ProxyID: input.ProxyID, ProxyMode: proxyMode, Name: input.Name, Notes: input.Notes, Platform: input.Platform, Type: input.Type, Credentials: input.Credentials, Extra: input.Extra, GroupIDs: input.GroupIDs, Concurrency: input.Concurrency, Priority: input.Priority, LoadFactor: input.LoadFactor, ExpiresAt: input.ExpiresAt, AutoPauseOnExpired: input.AutoPause, SkipDefaultGroupBind: true})
 	}
 	result, err := s.scopedAdminTransaction(ctx, id, action == "accounts.delete", func(txctx context.Context) (*Account, error) {
 		a, e := s.accountRepo.GetByID(txctx, id)
@@ -203,6 +213,21 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 		if a.IsShadow() {
 			return nil, infraerrors.Forbidden("SCOPED_ACCOUNT_FORBIDDEN", "不支持修改影子账户")
 		}
+		if a.IsProxyReplicaSource() {
+			checker, ok := s.accountRepo.(interface {
+				AuthorizeProxyReplicaOwnerWrite(context.Context, int64, []string) error
+			})
+			if !ok {
+				return nil, infraerrors.New(503, "SCOPED_ACCOUNT_UNAVAILABLE", "代理副本范围校验不可用")
+			}
+			actions := append([]string{}, permissions...)
+			if action != "" {
+				actions = append(actions, action)
+			}
+			if err := checker.AuthorizeProxyReplicaOwnerWrite(txctx, id, actions); err != nil {
+				return nil, err
+			}
+		}
 		shadows, e := s.accountRepo.ListShadowsByParent(txctx, id)
 		if e != nil {
 			return nil, e
@@ -227,6 +252,7 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 			Name        string         `json:"name"`
 			Notes       *string        `json:"notes"`
 			Credentials map[string]any `json:"credentials"`
+			Extra       map[string]any `json:"extra"`
 			Concurrency *int           `json:"concurrency"`
 			Priority    *int           `json:"priority"`
 			LoadFactor  *int           `json:"load_factor"`
@@ -239,6 +265,21 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 		body, _ := json.Marshal(fields)
 		if e = json.Unmarshal(body, &input); e != nil {
 			return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_INPUT", "请求格式无效")
+		}
+		if string(fields["expires_at"]) == "null" {
+			clearExpiry := int64(0)
+			input.ExpiresAt = &clearExpiry
+		}
+		if len(input.Extra) > 0 {
+			if !a.IsOpenAIOAuth() {
+				return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_FIELD", "WS 配置仅适用于 OpenAI OAuth")
+			}
+			merged := maps.Clone(a.Extra)
+			if merged == nil {
+				merged = map[string]any{}
+			}
+			maps.Copy(merged, input.Extra)
+			input.Extra = merged
 		}
 		if input.GroupIDs != nil {
 			groups, err := scopedAdminMergeGroups(principal.Policy, resource, a.GroupIDs, *input.GroupIDs)
@@ -264,7 +305,7 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 			maps.Copy(merged, input.Credentials)
 			input.Credentials = merged
 		}
-		updated, e := s.UpdateAccount(txctx, id, &UpdateAccountInput{ProxyID: input.ProxyID, Name: input.Name, Notes: input.Notes, Credentials: input.Credentials, Concurrency: input.Concurrency, Priority: input.Priority, LoadFactor: input.LoadFactor, Status: input.Status, GroupIDs: input.GroupIDs, ExpiresAt: input.ExpiresAt, AutoPauseOnExpired: input.AutoPause})
+		updated, e := s.UpdateAccount(txctx, id, &UpdateAccountInput{ProxyID: input.ProxyID, Name: input.Name, Notes: input.Notes, Credentials: input.Credentials, Extra: input.Extra, Concurrency: input.Concurrency, Priority: input.Priority, LoadFactor: input.LoadFactor, Status: input.Status, GroupIDs: input.GroupIDs, ExpiresAt: input.ExpiresAt, AutoPauseOnExpired: input.AutoPause})
 		if e != nil {
 			return nil, e
 		}
@@ -274,6 +315,39 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 		return updated, nil
 	})
 	return result, err
+}
+
+func validateScopedNetworkExtra(extra map[string]any) error {
+	for k, v := range extra {
+		switch k {
+		case "openai_oauth_responses_websockets_v2_mode":
+			mode, ok := v.(string)
+			if !ok || !slices.Contains([]string{OpenAIWSIngressModeOff, OpenAIWSIngressModeCtxPool, OpenAIWSIngressModePassthrough, OpenAIWSIngressModeHTTPBridge}, mode) {
+				return fmt.Errorf("invalid WS mode")
+			}
+		case "openai_oauth_responses_websockets_v2_enabled":
+			if _, ok := v.(bool); !ok {
+				return fmt.Errorf("invalid WS enabled")
+			}
+		default:
+			return fmt.Errorf("unsupported connection field")
+		}
+	}
+	return nil
+}
+
+// ScopedAdminSafeExtra never echoes arbitrary extension data or credentials.
+func ScopedAdminSafeExtra(a *Account) map[string]any {
+	out := map[string]any{}
+	for _, k := range []string{"openai_oauth_responses_websockets_v2_mode", "openai_oauth_responses_websockets_v2_enabled"} {
+		if v, ok := a.Extra[k]; ok && validateScopedNetworkExtra(map[string]any{k: v}) == nil {
+			out[k] = v
+		}
+	}
+	if owner := a.CredentialOwnerAccountID(); owner > 0 {
+		out[CredentialOwnerAccountIDKey] = owner
+	}
+	return out
 }
 
 // scopedAdminTransaction 锁住账户行，分组更改和外部操作均须在重新验权之后执行。

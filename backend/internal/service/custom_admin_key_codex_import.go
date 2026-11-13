@@ -67,6 +67,9 @@ func scopedCodexPermissions(credentials, extra map[string]any, proxy *int64) ([]
 		switch key {
 		case "import_source", "imported_at", "auth_provider", "session_token_present", "session_expires_at", "user_image", "user_picture", "account_structure", "account_residency_region", "compute_residency", "access_token_sha256":
 		case "codex_fingerprint_mode", "openai_oauth_responses_websockets_v2_enabled", "openai_oauth_responses_websockets_v2_mode":
+			if key != "codex_fingerprint_mode" && validateScopedNetworkExtra(map[string]any{key: extra[key]}) != nil {
+				return nil, infraerrors.BadRequest("SCOPED_CODEX_INPUT", "WS 配置无效")
+			}
 			permissions = append(permissions, "accounts.network")
 		default:
 			return nil, infraerrors.BadRequest("SCOPED_CODEX_FIELD", "导入包含未开放的扩展字段")
@@ -131,6 +134,17 @@ func (s *adminServiceImpl) ScopedAdminUpdateCodex(ctx context.Context, id int64,
 		resource := scopedAccountResource(current)
 		if err := requireScopedCodexPermissions(txctx, resource, permissions...); err != nil {
 			return nil, err
+		}
+		if current.IsProxyReplicaSource() {
+			checker, ok := s.accountRepo.(interface {
+				AuthorizeProxyReplicaOwnerWrite(context.Context, int64, []string) error
+			})
+			if !ok {
+				return nil, infraerrors.New(503, "SCOPED_CODEX_UNAVAILABLE", "代理副本范围校验不可用")
+			}
+			if err := checker.AuthorizeProxyReplicaOwnerWrite(txctx, id, permissions); err != nil {
+				return nil, err
+			}
 		}
 		safe := *input
 		if safe.SkipMixedChannelCheck {
