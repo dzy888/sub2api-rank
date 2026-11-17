@@ -281,6 +281,11 @@ func ProxyReplicaExtra(extra map[string]any) (map[string]any, error) {
 	delete(out, ProxyReplicaSourceKey)
 	delete(out, CredentialOwnerAccountIDKey)
 	delete(out, ProxyReplicaOperationKey)
+	// Each replica owns a fixed exit and concurrency limit. Never inherit the
+	// source's request pool, which would route around that binding.
+	for _, key := range []string{OpenAIProxyModeKey, OpenAIProxyIDsKey, ExcelBPSProxyModeKey, ExcelBPSProxyIDsKey} {
+		delete(out, key)
+	}
 	for key := range out {
 		if strings.HasPrefix(key, "codex_turn_ticket:") || strings.HasPrefix(key, "openai_auto_reset_credit") || strings.HasPrefix(key, "auto_reset_credit_") || key == OpenAIAutoResetCreditStateExtraKey {
 			delete(out, key)

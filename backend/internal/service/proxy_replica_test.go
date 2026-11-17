@@ -216,6 +216,35 @@ func TestProxyReplicaExtraDoesNotDuplicateQuotaOrTickets(t *testing.T) {
 	require.Equal(t, map[string]any{"keep_config": true}, extra)
 }
 
+func TestProxyReplicaKeepsBoundExitWithRequestPoolSettings(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		_, _, replica := proxyReplicaFixture()
+		modeKey, idsKey := OpenAIProxyModeKey, OpenAIProxyIDsKey
+		if legacy {
+			modeKey, idsKey = ExcelBPSProxyModeKey, ExcelBPSProxyIDsKey
+			replica.Extra["openai_excel_bps"] = true
+		}
+		replica.Extra[modeKey] = "request"
+		replica.Extra[idsKey] = []int64{22, 33}
+		require.False(t, replica.OpenAIRequestProxyEnabled())
+		require.False(t, replica.ExcelBPSRequestProxyEnabled())
+		svc := &adminServiceImpl{}
+		require.Error(t, svc.validateExcelBPSProxySettings(context.Background(), replica))
+		extra, err := ProxyReplicaExtra(replica.Extra)
+		require.NoError(t, err)
+		require.NotContains(t, extra, modeKey)
+		require.NotContains(t, extra, idsKey)
+		require.Equal(t, int64(11), *replica.ProxyID)
+		require.Equal(t, "request", replica.Extra[modeKey], "copy must preserve the source configuration")
+		if legacy {
+			replica.Extra[modeKey] = ExcelBPSProxyModeSession
+		} else {
+			replica.Extra[modeKey] = OpenAIProxyModeSingle
+		}
+		require.NoError(t, svc.validateExcelBPSProxySettings(context.Background(), replica), "single-proxy edits must remain available")
+	}
+}
+
 func TestProxyReplicaRevocationDoesNotDiscardInflightUsage(t *testing.T) {
 	repo, owner, replica := proxyReplicaFixture()
 	owner.Status = "disabled"
