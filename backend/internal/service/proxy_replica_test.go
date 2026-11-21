@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -39,6 +40,21 @@ func (r *proxyReplicaTestRepo) UpdateCredentials(_ context.Context, id int64, cr
 	return nil
 }
 
+func (r *proxyReplicaTestRepo) UpdateOpenAIOAuthCredentialsIfUnchanged(ctx context.Context, id int64, expected map[string]any, proxyID *int64, credentials map[string]any) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	account := r.accounts[id]
+	if account == nil || !account.IsOpenAIOAuth() || account.IsProxyReplica() ||
+		!reflect.DeepEqual(account.Credentials, expected) || !reflect.DeepEqual(account.ProxyID, proxyID) {
+		return false, nil
+	}
+	account.Credentials = shallowCopyMap(credentials)
+	return true, nil
+}
+
 func (r *proxyReplicaTestRepo) IsProxyReplicaSourceID(ctx context.Context, id int64) (bool, error) {
 	a, err := r.GetByID(ctx, id)
 	if err != nil {
@@ -53,6 +69,7 @@ func (*proxyReplicaTestCache) AcquireRefreshLock(context.Context, string, time.D
 	return true, nil
 }
 func (*proxyReplicaTestCache) ReleaseRefreshLock(context.Context, string) error { return nil }
+func (*proxyReplicaTestCache) DeleteAccessToken(context.Context, string) error  { return nil }
 
 type proxyReplicaTestExecutor struct{ calls atomic.Int32 }
 

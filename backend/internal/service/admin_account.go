@@ -120,6 +120,7 @@ var duplicateAccountDiscardedExtraKeys = map[string]struct{}{
 	// Provider observations, capability probes, and transient scheduling state.
 	"model_rate_limits":                      {},
 	QualityModelIsolationKey:                 {},
+	OAuth429ModelBlocksKey:                   {},
 	"session_window_utilization":             {},
 	"passive_usage_7d_utilization":           {},
 	"passive_usage_7d_reset":                 {},
@@ -431,6 +432,9 @@ func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *Updat
 // Grok media eligibility helpers live in account_grok_media_eligibility.go.
 
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
+	if err := ValidateAccountProbePenaltyExtra(accountExtra); err != nil {
+		return nil, err
+	}
 	if err := ValidateOpenAIRequestTimezoneExtra(input.Platform, accountExtra); err != nil {
 		return nil, err
 	}
@@ -518,6 +522,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
 	if err := ValidateAccountCostMultiplierExtra(input.Extra); err != nil {
+		return nil, err
+	}
+	if err := ValidateAccountProbePenaltyExtra(input.Extra); err != nil {
 		return nil, err
 	}
 	if err := s.ApplyOAuthAutoConfig(ctx, input); err != nil {
@@ -661,6 +668,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	// override any inherited preservation marker just as scheduling intent does.
 	ctx = withAccountStatusPreservation(ctx, input.Status == "")
 	if err := ValidateAccountCostMultiplierExtra(input.Extra); err != nil {
+		return nil, err
+	}
+	if err := ValidateAccountProbePenaltyExtra(input.Extra); err != nil {
 		return nil, err
 	}
 	if err := ValidateGroupAllowedModels(input.GroupAllowedModels); err != nil {
@@ -1093,8 +1103,12 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	// Dedicated quality restore/runtime paths use their own transaction/UpdateExtra.
 	updates = maps.Clone(updates)
 	delete(updates, QualityModelIsolationKey)
+	delete(updates, OAuth429ModelBlocksKey)
 	delete(updates, OAuthDegradationActionExtraKey)
 	if err := ValidateAccountCostMultiplierExtra(updates); err != nil {
+		return err
+	}
+	if err := ValidateAccountProbePenaltyExtra(updates); err != nil {
 		return err
 	}
 	if hasExcelBPSProxyUpdates(updates) {
@@ -1157,6 +1171,9 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 // It merges credentials/extra keys instead of overwriting the whole object.
 func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error) {
 	if err := ValidateAccountCostMultiplierExtra(input.Extra); err != nil {
+		return nil, err
+	}
+	if err := ValidateAccountProbePenaltyExtra(input.Extra); err != nil {
 		return nil, err
 	}
 	// Managed probe/session state may only enter through dedicated typed endpoints.

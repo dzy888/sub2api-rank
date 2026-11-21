@@ -1783,7 +1783,7 @@ export interface CodexUsageSnapshot {
 
 export type OpenAICompactMode = 'auto' | 'force_on' | 'force_off'
 export type OpenAIResponsesMode = 'auto' | 'force_responses' | 'force_chat_completions'
-export type OpenAIEndpointCapability = 'chat_completions' | 'embeddings' | 'seedance'
+export type OpenAIEndpointCapability = 'chat_completions' | 'embeddings' | 'seedance' | 'videos'
 
 export interface OpenAICompactState {
   openai_compact_mode?: OpenAICompactMode
@@ -2047,6 +2047,9 @@ export interface CustomerCacheCostDetail {
 
 export interface CustomerCostDetails {
   cache_cost_details?: CustomerCacheCostDetail[]
+  image_minimum_charge?: number
+  image_minimum_charge_adjustment?: number
+  probe_penalty?: { minimum_charge: number; adjustment: number; actual_cost: number; original_output_tokens: number; billing_output_tokens: number; output_token_price: number }
   version: number
   free_fast: boolean
   free_ultrafast?: boolean
@@ -2798,7 +2801,7 @@ export interface QualityJudgeConfig {
   prompt: string
 }
 export interface QualityJudgment {
-  kind?: 'llm' | 'jev'
+  kind?: 'llm' | 'jev' | 'ciallo'
   rules_version?: string
   latency_ms?: number
   verdict: 'correct' | 'incorrect' | 'unknown'
@@ -2882,7 +2885,8 @@ export interface PelicanTestConfig {
   quality_model_actions?: Record<string, string>
   trigger_source?: string
   quality?: QualityPolicy
-  question_kind?: 'candy' | 'pelican' | 'state_probe' | 'random_reasoning'
+  question_kind?: 'candy' | 'pelican' | 'state_probe' | 'random_reasoning' | 'ciallo'
+  ciallo?: { template_version: string; judge_version: string; protocol?: string }
   // Result-only identity of a runtime-generated question.
   random_question?: { id: string; family: 'paths' | 'weighted_xor'; version: string }
   quality_batch?: {
