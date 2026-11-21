@@ -126,6 +126,27 @@ func TestScopedAdminPrincipalContext(t *testing.T) {
 	require.Same(t, p, FromContext(WithPrincipal(context.Background(), p)))
 }
 
+func TestOpenAIQuotaReadPermissionOnlyGrantsScopedGet(t *testing.T) {
+	policy := Policy{Rules: []Rule{{Permissions: []string{"openai.quota.read"}, GroupIDs: []int64{7}, AccountTypes: []string{"oauth"}, Platforms: []string{"openai"}}}}
+	require.NoError(t, ValidatePolicy(policy))
+	require.True(t, RouteAllowed(policy, "GET", "/api/v1/admin/openai/accounts/:id/quota"))
+	for _, route := range []struct{ method, path string }{
+		{"POST", "/api/v1/admin/openai/accounts/:id/quota/refresh"},
+		{"POST", "/api/v1/admin/openai/accounts/:id/reset-quota"},
+		{"POST", "/api/v1/admin/openai/accounts/:id/refresh"},
+		{"GET", "/api/v1/admin/accounts/:id"},
+	} {
+		require.False(t, RouteAllowed(policy, route.method, route.path))
+	}
+	require.Error(t, ValidatePolicy(Policy{GlobalPermissions: []string{"openai.quota.read"}}))
+	// Group/type/platform constraints cannot be assembled from separate rules.
+	split := Policy{Rules: []Rule{
+		{Permissions: []string{"openai.quota.read"}, GroupIDs: []int64{7}, AccountTypes: []string{"apikey"}, Platforms: []string{"openai"}},
+		{Permissions: []string{"accounts.read"}, GroupIDs: []int64{7}, AccountTypes: []string{"oauth"}, Platforms: []string{"openai"}},
+	}}
+	require.False(t, split.AllowsAccount("openai.quota.read", Account{GroupIDs: []int64{7}, Type: "oauth", Platform: "openai"}))
+}
+
 func TestScopedAdminGroupModelsAreExplicitAndScoped(t *testing.T) {
 	p := Policy{Rules: []Rule{
 		{Permissions: []string{"groups.models.read"}, GroupIDs: []int64{2}, Platforms: []string{"openai"}},

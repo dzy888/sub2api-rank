@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -33,6 +34,10 @@ type openAIQuotaService interface {
 	CacheCreditsSnapshot(ctx context.Context, accountID int64, usage *service.OpenAIQuotaUsage) error
 	CachePostResetSnapshot(ctx context.Context, accountID int64, usage *service.OpenAIQuotaUsage) error
 	ResetCredit(ctx context.Context, accountID int64) (*service.OpenAIQuotaResetResult, error)
+}
+
+type openAIReadOnlyQuotaService interface {
+	QueryUsageReadOnly(ctx context.Context, account *service.Account) (*service.OpenAIQuotaUsage, error)
 }
 
 type openAIAccountStateRecoverer interface {
@@ -492,8 +497,35 @@ func buildOpenAICodexPATAccountName(name string, tokenInfo *service.OpenAITokenI
 // GET /api/v1/admin/openai/accounts/:id/quota
 func (h *OpenAIOAuthHandler) QueryQuota(c *gin.Context) {
 	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
+	if err != nil || accountID <= 0 {
 		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	if principal := adminaccess.FromContext(c.Request.Context()); principal != nil {
+		c.Header("Cache-Control", "no-store")
+		if h.adminService == nil {
+			response.Error(c, http.StatusServiceUnavailable, "Account lookup unavailable")
+			return
+		}
+		account, err := h.adminService.GetAccount(c.Request.Context(), accountID)
+		if err != nil || account == nil || account.ID != accountID || account.Platform != service.PlatformOpenAI || account.Type != service.AccountTypeOAuth ||
+			!principal.Policy.AllowsAccount("openai.quota.read", adminaccess.Account{ID: account.ID, GroupIDs: account.GroupIDs, Platform: account.Platform, Type: account.Type}) {
+			response.NotFound(c, "Account not found")
+			return
+		}
+		reader, ok := h.quotaService.(openAIReadOnlyQuotaService)
+		if !ok {
+			response.Error(c, http.StatusServiceUnavailable, "Read-only quota query unavailable")
+			return
+		}
+		// Use the same database snapshot for authorization and authentication.
+		// Scheduling is intentionally not a prerequisite for delivery acceptance.
+		usage, err := reader.QueryUsageReadOnly(c.Request.Context(), account)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		response.Success(c, usage)
 		return
 	}
 	if h.quotaService == nil {
