@@ -101,6 +101,24 @@ func TestScopedAdminAccountErrorsAreClassifiedAndRedacted(t *testing.T) {
 		t.Fatal(w.Body.String())
 	}
 }
+
+func TestScopedAdminAccountDTOIncludesRequestProxyGroupWithoutSecrets(t *testing.T) {
+	policy := adminaccess.Policy{Rules: []adminaccess.Rule{{Permissions: []string{"accounts.read"}, GroupIDs: []int64{252}, AccountTypes: []string{"oauth"}, Platforms: []string{"openai"}}}}
+	account := &service.Account{ID: 101, Platform: "openai", Type: "oauth", GroupIDs: []int64{252}, Schedulable: false,
+		Credentials: map[string]any{"access_token": "PRIVATE_TOKEN"},
+		Extra:       map[string]any{"openai_proxy_mode": "request", "openai_proxy_ids": []int64{11, 22}, "private": "PRIVATE_EXTRA"}}
+	encoded, err := json.Marshal(scopedAdminAccountDTO(account, policy))
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "PRIVATE")
+	var out struct {
+		Extra       map[string]any `json:"extra"`
+		Schedulable bool           `json:"schedulable"`
+	}
+	require.NoError(t, json.Unmarshal(encoded, &out))
+	require.Equal(t, "request", out.Extra["openai_proxy_mode"])
+	require.Equal(t, []any{float64(11), float64(22)}, out.Extra["openai_proxy_ids"])
+	require.False(t, out.Schedulable)
+}
 func TestScopedAdminAccountMiddlewareKeepsJWTAndDeniesUnavailableService(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, restricted := range []bool{false, true} {

@@ -86,6 +86,24 @@ x-api-key: <SCOPED_ADMIN_KEY>
 
 受限账户写入与 Codex 导入支持 `proxy_mode`：`direct`（直连）、`specified`（正数 `proxy_id`）、`random`（随机）、`least_used`（最少使用）。自动选择由服务端在账户写事务内从启用且未过期的代理中完成，无可用代理则失败。自动模式不能同时指定正数 `proxy_id`；旧字段 `random_proxy: true` 兼容随机模式，不能与其他模式冲突。随机候选查询与写入时自动选择是两个独立行为。
 
+## 按请求分散代理组
+
+受限 Key 在同一条 OpenAI OAuth 分组规则中拥有 `accounts.network` 后，可通过原账号更新接口绑定代理组。账号可以保持停调度，服务端按字段合并 `extra`，保留其余配置：
+
+```http
+PUT /api/v1/admin/accounts/123
+x-api-key: <SCOPED_ADMIN_KEY>
+Content-Type: application/json
+
+{"extra":{"openai_proxy_mode":"request","openai_proxy_ids":[11,22]}}
+```
+
+模式支持现有的 `request` 和 `single`。代理组复用现有校验：请求模式必须有启用且未过期的代理，代理不存在、停用、过期或账号使用不兼容的固定/托管授权时返回错误，不保存失败配置。代理副本继续遵守固定出口限制。
+
+拥有 `accounts.read` 的同一把 Key 可用 `GET /api/v1/admin/accounts/123` 读回 `extra.openai_proxy_mode` 和 `extra.openai_proxy_ids`，核对后再通过独立调度权限开启账号。读回不包含代理凭据或其他私有扩展字段。账号创建和 Codex 导入的字段约定不变。
+
+Push 的规则应包含目标分组、平台 `openai`、类型 `oauth`，以及 `accounts.network`、`accounts.read`；预检账号清理还需要 `accounts.delete`。这些配置须由管理员在部署后为对应 Key 授权。
+
 ## Codex 会话导入
 
 受限密钥可使用 `POST /api/v1/admin/accounts/import/codex-session`，但不会回退到全权管理员导入流程。

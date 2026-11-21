@@ -47,8 +47,15 @@ func scopedAccountFieldPermissions(fields map[string]json.RawMessage, create boo
 			permission = "accounts.network"
 		case "extra":
 			var extra map[string]any
-			if json.Unmarshal(raw, &extra) != nil || len(extra) == 0 || validateScopedNetworkExtra(extra) != nil {
-				return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_FIELD", "仅开放 WS 连接配置")
+			if json.Unmarshal(raw, &extra) != nil || len(extra) == 0 {
+				return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_FIELD", "连接配置格式无效")
+			}
+			validate := validateScopedNetworkUpdateExtra
+			if create {
+				validate = validateScopedNetworkExtra
+			}
+			if validate(extra) != nil {
+				return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_FIELD", "请求包含未开放或无效的连接配置")
 			}
 			permission = "accounts.network"
 		case "group_ids":
@@ -272,7 +279,7 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 		}
 		if len(input.Extra) > 0 {
 			if !a.IsOpenAIOAuth() {
-				return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_FIELD", "WS 配置仅适用于 OpenAI OAuth")
+				return nil, infraerrors.BadRequest("SCOPED_ACCOUNT_FIELD", "连接配置仅适用于 OpenAI OAuth")
 			}
 			merged := maps.Clone(a.Extra)
 			if merged == nil {
@@ -336,12 +343,43 @@ func validateScopedNetworkExtra(extra map[string]any) error {
 	return nil
 }
 
+// Request-proxy groups are account-update fields. Creation and Codex import
+// retain their existing WS-only extra contract. UpdateAccount validates the
+// merged group against the saved account and enabled, unexpired proxy records.
+func validateScopedNetworkUpdateExtra(extra map[string]any) error {
+	for k, v := range extra {
+		switch k {
+		case OpenAIProxyModeKey:
+			mode, ok := v.(string)
+			if !ok || (mode != OpenAIProxyModeSingle && mode != OpenAIProxyModeRequest) {
+				return fmt.Errorf("invalid OpenAI proxy mode")
+			}
+		case OpenAIProxyIDsKey:
+			if _, valid := parseExcelBPSProxyIDs(v); !valid {
+				return fmt.Errorf("invalid OpenAI proxy IDs")
+			}
+		default:
+			if err := validateScopedNetworkExtra(map[string]any{k: v}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // ScopedAdminSafeExtra never echoes arbitrary extension data or credentials.
 func ScopedAdminSafeExtra(a *Account) map[string]any {
 	out := map[string]any{}
 	for _, k := range []string{"openai_oauth_responses_websockets_v2_mode", "openai_oauth_responses_websockets_v2_enabled"} {
 		if v, ok := a.Extra[k]; ok && validateScopedNetworkExtra(map[string]any{k: v}) == nil {
 			out[k] = v
+		}
+	}
+	if a.IsOpenAIOAuth() {
+		for _, k := range []string{OpenAIProxyModeKey, OpenAIProxyIDsKey} {
+			if v, ok := a.Extra[k]; ok && validateScopedNetworkUpdateExtra(map[string]any{k: v}) == nil {
+				out[k] = v
+			}
 		}
 	}
 	if owner := a.CredentialOwnerAccountID(); owner > 0 {
