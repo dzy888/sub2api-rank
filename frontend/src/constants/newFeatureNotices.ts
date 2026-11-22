@@ -4,11 +4,14 @@
  * browser; use a new ID to announce the feature again in a later release.
  */
 export const NEW_FEATURE_NOTICES = {
+  modelPlazaCurrency: 'model-plaza-display-currency-20261121',
   exaSearch: 'exa-search-provider',
   claudeWindowCost: 'claude-window-cost-estimate',
   openaiVideos: 'openai-videos-endpoint-capability',
+  channelBalanceOverview: 'channel-balance-overview-20261122',
   channelConfig: 'channel-configuration-20261119',
   imageUsageBilling: 'image-usage-minimum-charge-20261119',
+  crossPlatformGatewayAccounts: 'cross-platform-gateway-accounts',
   newAPICostConversion: 'new-api-cost-conversion-20261119',
   accountOpsBalanceNotification: 'account-ops-per-account-balance-notification-20261119',
   channelUltrafastPricing: 'channel-ultrafast-pricing-initial-announcement',

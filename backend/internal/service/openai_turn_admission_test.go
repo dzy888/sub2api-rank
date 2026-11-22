@@ -131,6 +131,22 @@ func TestOpenAITurnAdmissionLocalCache(t *testing.T) {
 	require.NotEqual(t, "https://mutated.example.invalid", second.Credentials["base_url"])
 }
 
+func TestProxyReplicaAdmissionBypassesCacheAfterOwnerRevocation(t *testing.T) {
+	_, owner, replica := proxyReplicaFixture()
+	repo := &turnAdmissionRepo{account: replica, parent: owner}
+	cfg := &config.Config{}
+	cfg.Gateway.Scheduling.OpenAITurnAdmissionCacheTTLSeconds = 300
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg}
+	svc.openAITurnAdmissionCache.store(replica, owner)
+	_, err := svc.latestOpenAITurnAccountForGroup(context.Background(), replica, 0, false)
+	require.NoError(t, err)
+	require.Equal(t, 1, repo.reads, "replicas must re-read authority even with a populated admission cache")
+	owner.Status = "disabled"
+	_, err = svc.latestOpenAITurnAccountForGroup(context.Background(), replica, 0, false)
+	require.ErrorContains(t, err, "credential_owner_ineligible")
+	require.Equal(t, 2, repo.reads)
+}
+
 func TestOpenAITurnAdmissionExplicitGroupRejectsRemovedMembership(t *testing.T) {
 	selected := ticketTestAccount(905)
 	selected.GroupIDs = []int64{9}

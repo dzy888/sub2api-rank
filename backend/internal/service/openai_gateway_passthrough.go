@@ -140,6 +140,20 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	ctx = withOpenAITransportMode(ctx, "passthrough")
 	requestedModel := reqModel
 	upstreamPassthroughModel := ""
+	// Gateway accounts retain explicit portable mappings even though their
+	// transport uses passthrough. Legacy passthrough keeps its original contract.
+	if account != nil && account.gatewayProtocolSource != nil {
+		mappedModel := account.GetMappedModel(reqModel)
+		if mappedModel != "" && mappedModel != reqModel {
+			nextBody, setErr := sjson.SetBytes(body, "model", mappedModel)
+			if setErr != nil {
+				return nil, fmt.Errorf("set gateway passthrough model: %w", setErr)
+			}
+			body = nextBody
+			upstreamPassthroughModel = mappedModel
+			attemptImageIntentInvalidated = true
+		}
+	}
 	if isOpenAIResponsesCompactPath(c) && !account.IsCopilotSDKEnabled() {
 		compactMappedModel := s.resolveOpenAICompactFallbackModel(account, reqModel)
 		if compactMappedModel != "" && compactMappedModel != reqModel {
@@ -901,6 +915,9 @@ func shouldFailoverOpenAIPassthroughResponse(account *Account, statusCode int, r
 	if account != nil && account.IsOpenAICompatible() && isUpstreamModelNotFoundError(statusCode, responseBody) {
 		return true
 	}
+	if isOpenAIWrappedConcurrency401(account, statusCode, responseBody) || (usesOpenAIOAuthRetryAffinity(account) && isOpenAIOAuthTransientServerStatus(statusCode)) {
+		return true
+	}
 	if account != nil && account.IsPoolMode() && account.IsPoolModeRetryableStatus(statusCode) {
 		return true
 	}
@@ -1038,7 +1055,7 @@ func (s *OpenAIGatewayService) handleFailoverErrorResponsePassthrough(
 		Detail:               upstreamDetail,
 		UpstreamResponseBody: upstreamDetail,
 	})
-	return s.newOpenAIAccountFailoverError(
+	return s.newOpenAIHTTPAccountFailoverError(
 		account,
 		resp.StatusCode,
 		resp.Header,
@@ -2034,6 +2051,13 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 		classificationHeaders = nil
 	}
 	failoverErr := s.newOpenAIAccountFailoverErrorWithClassificationHeaders(account, statusCode, headers, classificationHeaders, payload, message, shouldDisable, retryableOnSameAccount)
+	// A nil frame with this message is generated locally on a pre-output disconnect.
+	// Generic provider SSE errors also map to 502; that alone does not identify a disconnect.
+	if !shouldDisable && usesOpenAIOAuthRetryAffinity(account) && failoverErr.Scope == "" &&
+		((len(payload) == 0 && strings.HasPrefix(message, "OpenAI stream disconnected before completion")) ||
+			(statusCode == http.StatusServiceUnavailable && failoverErr.RequestScopedTransient)) {
+		failoverErr.preserveOpenAIOAuthBinding()
+	}
 	failoverErr = failoverErr.WithGrokForbiddenPolicy(account)
 	if len(payload) > 0 && account != nil {
 		failoverErr.StreamFailedFrame = &OpenAIStreamFailedFrame{Platform: account.Platform, Payload: payload, Message: message}
