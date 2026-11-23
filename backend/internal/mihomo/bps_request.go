@@ -11,6 +11,12 @@ import (
 // Background membership refresh runs every 15 seconds. Allow one refresh
 // window plus bounded account lookup/probe work, then fail closed on DB errors.
 const BPSStaticRequestMembershipMaxAge = 30 * time.Second
+const bpsRequestMaxSessions = 16384
+
+type bpsRequestSessionKey struct {
+	accountID int64
+	scope     string
+}
 
 // BPSStaticProxy is a credential-bearing background snapshot. It must never be
 // logged. Expiry is checked again on every acquisition, not just on refresh.
@@ -24,11 +30,17 @@ type bpsRequestAccount struct {
 	active map[string]int
 	last   string
 }
+type bpsRequestSession struct {
+	node     string
+	active   int
+	lastUsed time.Time
+}
 type bpsRequestPool struct {
 	refreshedAt time.Time
 	records     map[int64]BPSStaticProxy
 	groups      map[int64][]int64
 	accounts    map[int64]*bpsRequestAccount
+	sessions    map[bpsRequestSessionKey]*bpsRequestSession
 	warmCursor  int
 }
 
@@ -53,7 +65,13 @@ func SetBPSStaticProxyRecords(records []BPSStaticProxy) {
 	m.bpsMu.Lock()
 	defer m.bpsMu.Unlock()
 	m.bpsRequests.records = next
-	m.bpsRequests.refreshedAt = time.Now()
+	now := time.Now()
+	m.bpsRequests.refreshedAt = now
+	for key, binding := range m.bpsRequests.sessions {
+		if binding.active == 0 && (now.Sub(binding.lastUsed) >= bpsSessionIdleTTL || urls[binding.node] == "") {
+			delete(m.bpsRequests.sessions, key)
+		}
+	}
 	m.bpsStatic = urls
 }
 
@@ -81,10 +99,19 @@ func SetBPSStaticRequestGroups(groups map[int64][]int64) {
 // healthy selected exit for this account. Equal loads rotate fairly. It never
 // binds a conversation, probes on the request path, or uses an unselected exit.
 func AcquireBPSStaticRequestLease(ctx context.Context, accountID int64, proxyIDs []int64, excludedProxyURLs ...string) (*BPSLease, error) {
+	return bpsStaticManager.acquireBPSStaticRequestLease(ctx, accountID, proxyIDs, "", excludedProxyURLs)
+}
+
+// AcquireBPSStaticSessionRequestLease prefers the session's healthy exit
+// inside the same allowlist and load pool used by ordinary request leases.
+func AcquireBPSStaticSessionRequestLease(ctx context.Context, scope string, accountID int64, proxyIDs []int64) (*BPSLease, error) {
+	return bpsStaticManager.acquireBPSStaticRequestLease(ctx, accountID, proxyIDs, scope, nil)
+}
+
+func (m *Manager) acquireBPSStaticRequestLease(ctx context.Context, accountID int64, proxyIDs []int64, scope string, excludedProxyURLs []string) (*BPSLease, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	m := bpsStaticManager
 	m.bpsMu.Lock()
 	defer m.bpsMu.Unlock()
 	excluded := make(map[string]bool, len(excludedProxyURLs))
@@ -115,7 +142,6 @@ func AcquireBPSStaticRequestLease(ctx context.Context, accountID int64, proxyIDs
 	if accountID <= 0 || len(nodes) == 0 {
 		return nil, bpsAcquisitionError(bpsSelectionError("selected_pool_unavailable", "selected BPS proxies have no healthy exit"), 0)
 	}
-	sort.Strings(nodes)
 	if m.bpsRequests.accounts == nil {
 		m.bpsRequests.accounts = make(map[int64]*bpsRequestAccount)
 	}
@@ -124,26 +150,49 @@ func AcquireBPSStaticRequestLease(ctx context.Context, accountID int64, proxyIDs
 		a = &bpsRequestAccount{active: make(map[string]int)}
 		m.bpsRequests.accounts[accountID] = a
 	}
-	start := sort.SearchStrings(nodes, a.last)
-	if start < len(nodes) && nodes[start] == a.last {
-		start++
+	key := bpsRequestSessionKey{accountID: accountID, scope: scope}
+	binding := m.bpsRequests.sessions[key]
+	if binding != nil && !seen[binding.node] {
+		if binding.active > 0 {
+			return nil, bpsAcquisitionError(bpsSelectionError("session_draining", "bound proxy is unavailable while requests are active"), 0)
+		}
+		delete(m.bpsRequests.sessions, key)
+		binding = nil
 	}
-	best := ""
-	load := int(^uint(0) >> 1)
-	for i := 0; i < len(nodes); i++ {
-		node := nodes[(start+i)%len(nodes)]
-		if a.active[node] < load {
-			best = node
-			load = a.active[node]
+	if binding != nil && binding.active == 0 && now.Sub(binding.lastUsed) >= bpsSessionIdleTTL {
+		delete(m.bpsRequests.sessions, key)
+		binding = nil
+	}
+	var best string
+	if binding != nil {
+		best = binding.node
+	} else {
+		best = leastBusyBPSRequestExit(nodes, a)
+		a.last = best
+		// Under exceptional cardinality, preserve existing bindings and still
+		// serve new requests through the authorized per-request pool.
+		if scope != "" && len(m.bpsRequests.sessions) < bpsRequestMaxSessions {
+			if m.bpsRequests.sessions == nil {
+				m.bpsRequests.sessions = make(map[bpsRequestSessionKey]*bpsRequestSession)
+			}
+			binding = &bpsRequestSession{node: best}
+			m.bpsRequests.sessions[key] = binding
 		}
 	}
-	a.last = best
+	if binding != nil {
+		binding.active++
+		binding.lastUsed = now
+	}
 	a.active[best]++
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
 			m.bpsMu.Lock()
 			defer m.bpsMu.Unlock()
+			if binding != nil {
+				binding.active--
+				binding.lastUsed = time.Now()
+			}
 			a.active[best]--
 			if a.active[best] == 0 {
 				delete(a.active, best)
@@ -154,6 +203,22 @@ func AcquireBPSStaticRequestLease(ctx context.Context, accountID int64, proxyIDs
 		})
 	}
 	return &BPSLease{ProxyID: selected[best].ID, ProxyName: selected[best].Name, ProxyURL: m.bpsStatic[best], manager: m, node: best, generation: m.bpsHealthAtLocked(best, now).generation, release: release}, nil
+}
+
+func leastBusyBPSRequestExit(nodes []string, account *bpsRequestAccount) string {
+	sort.Strings(nodes)
+	start := sort.SearchStrings(nodes, account.last)
+	if start < len(nodes) && nodes[start] == account.last {
+		start++
+	}
+	best := nodes[start%len(nodes)]
+	for i := 1; i < len(nodes); i++ {
+		node := nodes[(start+i)%len(nodes)]
+		if account.active[node] < account.active[best] {
+			best = node
+		}
+	}
+	return best
 }
 
 // Warming selected subsets is independent of the old global warm target. A

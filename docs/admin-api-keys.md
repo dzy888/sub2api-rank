@@ -102,6 +102,8 @@ Content-Type: application/json
 
 拥有 `accounts.read` 的同一把 Key 可用 `GET /api/v1/admin/accounts/123` 读回 `extra.openai_proxy_mode` 和 `extra.openai_proxy_ids`，核对后再通过独立调度权限开启账号。读回不包含代理凭据或其他私有扩展字段。账号创建和 Codex 导入的字段约定不变。
 
+完整管理员可在账号 `extra` 中另设 `openai_request_proxy_session_affinity: true`，让 HTTP Responses 在所选代理组内按会话保持出口。新会话继续按在途负载分配，缺少有效会话标识的请求仍逐次分配。绑定按账号和 API Key 隔离，空闲 30 分钟或进程重启后重新分配。代理失效后，待该会话已有请求结束，再从配置的健康出口重选。
+
 Push 的规则应包含目标分组、平台 `openai`、类型 `oauth`，以及 `accounts.network`、`accounts.read`；预检账号清理还需要 `accounts.delete`。这些配置须由管理员在部署后为对应 Key 授权。
 
 ## Codex 会话导入

@@ -171,6 +171,37 @@ func TestOpenAIRequestProxyForwardSameSessionDistributesSixThroughThree(t *testi
 	require.Equal(t, map[int]int{1: 2, 2: 2, 3: 2}, hits)
 }
 
+func TestOpenAIRequestProxyForwardSessionAffinityPinsAuthenticatedResponses(t *testing.T) {
+	seen := make(chan int, 3)
+	svc, account := localBPSRequestProxyFixture(t, 3, func(id int, w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		seen <- id
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, bpsRequestCompletedWire)
+	})
+	account.Extra["openai_excel_bps"] = false
+	account.Extra["openai_proxy_mode"] = "request"
+	account.Extra["openai_proxy_ids"] = []int64{1, 2}
+	account.Extra[openAIRequestProxySessionAffinityExtra] = true
+
+	for i, keyID := range []int64{100, 100, 101} {
+		body := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":"turn %d","stream":true,"prompt_cache_key":"moving-hint-%d"}`, i, i))
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body)).WithContext(t.Context())
+		c.Request.Header.Set("thread-id", "same-declared-thread")
+		c.Set("api_key", &APIKey{ID: keyID})
+		result, err := svc.Forward(c.Request.Context(), c, account, body)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.Equal(t, http.StatusOK, rec.Code)
+	}
+	first, second, otherKey := <-seen, <-seen, <-seen
+	require.Contains(t, []int{1, 2}, first)
+	require.Equal(t, first, second)
+	require.Equal(t, 3-first, otherKey)
+}
+
 func TestOpenAIRequestProxyForwardCancellationReleasesExitWhileOtherStreamsStayBusy(t *testing.T) {
 	arrived := make(chan int, 4)
 	svc, account := localBPSRequestProxyFixture(t, 3, func(id int, w http.ResponseWriter, r *http.Request) {

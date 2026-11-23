@@ -98,6 +98,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		account = view
 	}
+	ctx = withOpenAIRequestProxySession(ctx, c, account, body)
 	ctx = s.withOAuth429Routing(ctx, gjson.GetBytes(body, "model").String(), IsOpenAIResponsesCompactPath(c))
 	endpoint := ""
 	if IsOpenAIResponsesCompactPath(c) {

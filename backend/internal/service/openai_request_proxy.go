@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -14,8 +16,10 @@ import (
 var errOpenAIRequestProxyUnavailable = errors.New("selected OpenAI request proxies are unavailable")
 
 type openAIRequestProxyContextKey struct{}
+type openAIRequestProxySessionKey struct{}
 
 const openAIRequestProxyOpsKey = "openai_request_proxy_ops_route"
+const openAIRequestProxySessionAffinityExtra = "openai_request_proxy_session_affinity"
 
 type openAIRequestProxyRoute struct {
 	accountID   int64
@@ -121,7 +125,15 @@ func (s *OpenAIGatewayService) beginOpenAIRequestProxy(ctx context.Context, c *g
 		}
 		return ctx, noop, writeOpenAIRequestProxyError(c, "openai_proxy_unavailable", "Selected proxy scope does not match the account")
 	}
-	lease, err := mihomo.AcquireBPSStaticRequestLease(ctx, account.ID, account.OpenAIRequestProxyIDs())
+	scope, _ := ctx.Value(openAIRequestProxySessionKey{}).(string)
+	ids := account.OpenAIRequestProxyIDs()
+	var lease *mihomo.BPSLease
+	var err error
+	if scope != "" && account.requestProxySessionAffinityEnabled() {
+		lease, err = mihomo.AcquireBPSStaticSessionRequestLease(ctx, scope, account.ID, ids)
+	} else {
+		lease, err = mihomo.AcquireBPSStaticRequestLease(ctx, account.ID, ids)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx, noop, ctx.Err()
@@ -135,6 +147,38 @@ func (s *OpenAIGatewayService) beginOpenAIRequestProxy(ctx context.Context, c *g
 	release := route.finish
 	stop := context.AfterFunc(ctx, release)
 	return context.WithValue(ctx, openAIRequestProxyContextKey{}, route), func() { stop(); release() }, nil
+}
+
+func (a *Account) requestProxySessionAffinityEnabled() bool {
+	if !a.OpenAIRequestProxyEnabled() {
+		return false
+	}
+	enabled, _ := a.Extra[openAIRequestProxySessionAffinityExtra].(bool)
+	return enabled
+}
+
+// Capture the declared identity before request transformations. A content-derived
+// account scheduling hash is too broad to use as an egress binding.
+func withOpenAIRequestProxySession(ctx context.Context, c *gin.Context, account *Account, body []byte) context.Context {
+	if !account.requestProxySessionAffinityEnabled() {
+		return ctx
+	}
+	apiKeyID := getAPIKeyIDFromContext(c)
+	if apiKeyID <= 0 {
+		return ctx
+	}
+	identity := resolveOpenAIClientSessionIdentity(c, body)
+	var value string
+	switch identity.metadata.Status {
+	case OpenAIClientSessionIdentityResolved:
+		value = identity.identity.value
+	case OpenAIClientSessionIdentityMissing:
+		value = sanitizeSessionID(explicitOpenAISessionID(c, body))
+	}
+	if value == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, openAIRequestProxySessionKey{}, fmt.Sprintf("%d:%x", apiKeyID, sha256.Sum256([]byte(value))))
 }
 
 func writeOpenAIRequestProxyError(c *gin.Context, code, message string) error {

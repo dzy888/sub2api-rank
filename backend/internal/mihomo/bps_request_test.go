@@ -78,6 +78,65 @@ func TestBPSRequestPoolDistributesConcurrentRequestsThroughSelectedProxies(t *te
 	require.Equal(t, map[int]int{1: 2, 2: 2, 3: 2}, hits, fmt.Sprint(hits))
 }
 
+func TestBPSRequestPoolSessionLeasePinsScopeAndKeepsGroupsSeparate(t *testing.T) {
+	bpsStaticTestPool(t, func(context.Context, string) error { return nil })
+	SetBPSStaticProxyRecords([]BPSStaticProxy{
+		{ID: 1, URL: "http://one.invalid:8080"},
+		{ID: 2, URL: "http://two.invalid:8080"},
+		{ID: 3, URL: "http://three.invalid:8080"},
+	})
+	SetBPSStaticRequestGroups(map[int64][]int64{300: {1, 2}, 301: {2, 3}})
+	WarmBPSPools(t.Context(), 0, 1)
+
+	first, err := AcquireBPSStaticSessionRequestLease(t.Context(), "account:300/session:a", 300, []int64{1, 2})
+	require.NoError(t, err)
+	firstURL := first.ProxyURL
+	first.Release()
+
+	again, err := AcquireBPSStaticSessionRequestLease(t.Context(), "account:300/session:a", 300, []int64{1, 2})
+	require.NoError(t, err)
+	require.Equal(t, firstURL, again.ProxyURL, "one session must keep its selected exit")
+	again.Release()
+
+	other, err := AcquireBPSStaticSessionRequestLease(t.Context(), "account:300/session:b", 300, []int64{1, 2})
+	require.NoError(t, err)
+	require.NotEqual(t, firstURL, other.ProxyURL, "new sessions still spread over the least busy exits")
+	other.Release()
+
+	foreign, err := AcquireBPSStaticSessionRequestLease(t.Context(), "account:301/session:a", 301, []int64{2, 3})
+	require.NoError(t, err)
+	require.Contains(t, []string{"http://two.invalid:8080", "http://three.invalid:8080"}, foreign.ProxyURL)
+	foreign.Release()
+}
+
+func TestBPSRequestPoolSessionLeaseRebindsOnlyAfterActiveRequestCloses(t *testing.T) {
+	bpsStaticTestPool(t, func(context.Context, string) error { return nil })
+	records := []BPSStaticProxy{{ID: 1, URL: "http://one.invalid:8080"}, {ID: 2, URL: "http://two.invalid:8080"}}
+	SetBPSStaticProxyRecords(records)
+	SetBPSStaticRequestGroups(map[int64][]int64{300: {1, 2}})
+	WarmBPSPools(t.Context(), 0, 1)
+
+	old, err := AcquireBPSStaticSessionRequestLease(t.Context(), "session", 300, []int64{1, 2})
+	require.NoError(t, err)
+	t.Cleanup(old.Release)
+	concurrent, err := AcquireBPSStaticSessionRequestLease(t.Context(), "session", 300, []int64{1, 2})
+	require.NoError(t, err)
+	require.Equal(t, old.ProxyID, concurrent.ProxyID)
+	concurrent.Release()
+
+	// Removing the bound record while a stream is active must not split the session.
+	remaining := int64(3) - old.ProxyID
+	SetBPSStaticProxyRecords([]BPSStaticProxy{records[remaining-1]})
+	_, err = AcquireBPSStaticSessionRequestLease(t.Context(), "session", 300, []int64{1, 2})
+	require.Error(t, err)
+	old.Release()
+
+	next, err := AcquireBPSStaticSessionRequestLease(t.Context(), "session", 300, []int64{1, 2})
+	require.NoError(t, err)
+	defer next.Release()
+	require.Equal(t, remaining, next.ProxyID)
+}
+
 func TestBPSRequestPoolAccountsKeepIndependentSelectedGroupsAndLoads(t *testing.T) {
 	bpsStaticTestPool(t, func(context.Context, string) error { return nil })
 	SetBPSStaticProxyRecords([]BPSStaticProxy{{ID: 1, URL: "http://one.invalid:8080"}, {ID: 2, URL: "http://two.invalid:8080"}, {ID: 3, URL: "http://three.invalid:8080"}})
