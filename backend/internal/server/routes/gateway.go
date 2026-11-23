@@ -103,7 +103,7 @@ func RegisterGatewayRoutes(
 		original := groupModelAllowlist
 		groupModelAllowlist = func(c *gin.Context) {
 			path := c.Request.URL.Path
-			discovery := c.Request.Method == http.MethodGet && (strings.Contains(path, "/models") || strings.HasSuffix(path, "/usage"))
+			discovery := c.Request.Method == http.MethodGet && (strings.Contains(path, "/models") || strings.HasSuffix(path, "/usage") || middleware.IsGatewayUsagePath(path))
 			generation := (c.Request.Method == http.MethodPost && (strings.HasSuffix(path, "/responses") || strings.HasSuffix(path, "/chat/completions"))) || (c.Request.Method == http.MethodGet && strings.HasSuffix(path, "/responses"))
 			key, ok := middleware.GetAPIKeyFromContext(c)
 			if !discovery && (!generation || !ok || key.Group == nil || key.Group.Platform != service.PlatformOpenAI) {
@@ -290,6 +290,7 @@ func RegisterGatewayRoutes(
 	gateway.Use(opsErrorLogger)
 	gateway.Use(endpointNorm)
 	gateway.Use(gin.HandlerFunc(apiKeyAuth))
+	gateway.GET("/sub2api/group-health", channelMonitorModeV3Guard(settingService), h.ChannelMonitorV3.KeyGroupHealth)
 	gateway.Use(captureTraffic)
 	gateway.Use(imageAdmission)
 	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)
@@ -324,6 +325,7 @@ func RegisterGatewayRoutes(
 		// Single-model discovery never selects the Codex client_version manifest.
 		gateway.GET("/models/:model", h.Gateway.Models)
 		gateway.GET("/usage", h.Gateway.Usage)
+		gateway.GET("/usage/records", h.UsageRecords.List)
 		gateway.POST("/live", h.OpenAIGateway.Live)
 		gateway.GET("/live/:call_id", h.OpenAIGateway.LiveSideband)
 		// OpenAI Responses API: auto-route based on group platform
