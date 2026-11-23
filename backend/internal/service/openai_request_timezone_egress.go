@@ -46,7 +46,7 @@ func (s *OpenAIGatewayService) withRequestTimezoneEgress(ctx context.Context, ac
 
 func (b *requestTimezoneBinding) enabled(ctx context.Context) bool {
 	return b != nil && b.service.settingService.GetOpenAIRequestTimezoneEnabled(ctx, false) &&
-		b.service.settingService.GetOpenAIRequestTimezoneAuto(ctx, false)
+		b.service.requestTimezoneFollowsEgress(ctx, b.account)
 }
 
 func (s *OpenAIGatewayService) egressRequestTimezone(ctx context.Context, proxy string) string {
@@ -187,7 +187,7 @@ func (s *OpenAIGatewayService) requestTimezoneHeaders(ctx context.Context, accou
 			}
 		}
 	}
-	if !s.settingService.GetOpenAIRequestTimezoneAuto(ctx, false) {
+	if !s.requestTimezoneFollowsEgress(ctx, account) {
 		rewriteRequestTimezoneHeaders(target, account.OpenAIRequestTimezone())
 	}
 }

@@ -1136,9 +1136,10 @@ func (p *openAIWSConnPool) Acquire(ctx context.Context, req openAIWSAcquireReque
 		req.timezoneBinding, _ = ctx.Value(requestTimezoneEgressKey{}).(*requestTimezoneBinding)
 	}
 	if b := req.timezoneBinding; b != nil && b.service.settingService.GetOpenAIRequestTimezoneEnabled(ctx, false) {
-		req.timezoneMode = "manual"
-		if b.service.settingService.GetOpenAIRequestTimezoneAuto(ctx, false) {
+		if b.service.requestTimezoneFollowsEgress(ctx, b.account) {
 			req.timezoneMode = "auto"
+		} else {
+			req.timezoneMode = "manual:" + b.account.OpenAIRequestTimezone()
 		}
 	}
 	if p != nil {

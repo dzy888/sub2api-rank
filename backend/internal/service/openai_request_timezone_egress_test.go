@@ -94,6 +94,47 @@ func TestRequestTimezoneEgressModesAndSwitch(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestTimezoneFixedAccountKeepsBodyAcrossDifferentExits(t *testing.T) {
+	probe := &egressTimezoneProber{probe: func(_ context.Context, proxy string) (*ProxyExitInfo, int64, error) {
+		zone := "Europe/Warsaw"
+		if proxy == "west" {
+			zone = "America/Los_Angeles"
+		}
+		return &ProxyExitInfo{IP: "203.0.113.10", Timezone: zone}, 0, nil
+	}}
+	svc := timezoneAutoService(true, true, probe)
+	account := &Account{ID: 45, Platform: PlatformOpenAI, Extra: map[string]any{
+		openAIRequestTimezoneModeExtraKey: "fixed", openAIRequestTimezoneExtraKey: "Asia/Shanghai",
+	}}
+	require.NoError(t, ValidateOpenAIRequestTimezoneExtra(account.Platform, account.Extra))
+	require.Error(t, ValidateOpenAIRequestTimezoneExtra(account.Platform, map[string]any{openAIRequestTimezoneModeExtraKey: "fixed"}))
+	original := localeTestBody([]string{"<environment_context><timezone>Asia/Tokyo</timezone></environment_context>"}, nil)
+	forward := func(account *Account, exit, zone string) []byte {
+		t.Helper()
+		ctx := svc.withRequestTimezoneEgress(t.Context(), account)
+		body := svc.normalizeRequestTimezone(ctx, account, original, "http")
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/v1/responses", bytes.NewReader(body))
+		require.NoError(t, err)
+		svc.requestTimezoneHeaders(ctx, account, http.Header{"X-Timezone": {"Asia/Tokyo"}}, req.Header)
+		sent, err := BindOpenAIRequestTimezone(req, exit)
+		require.NoError(t, err)
+		defer sent.Body.Close()
+		wire, err := io.ReadAll(sent.Body)
+		require.NoError(t, err)
+		require.Equal(t, zone, sent.Header.Get("X-Timezone"))
+		require.Contains(t, gjson.GetBytes(wire, "input.0.content.0.text").String(), "<timezone>"+zone+"</timezone>")
+		return wire
+	}
+	require.Equal(t, forward(account, "west", "Asia/Shanghai"), forward(account, "east", "Asia/Shanghai"))
+	require.Empty(t, probe.calls)
+
+	// Accounts with a saved timezone but no override continue to use the global policy.
+	other := &Account{ID: 46, Platform: PlatformOpenAI, Extra: map[string]any{openAIRequestTimezoneExtraKey: "Asia/Shanghai"}}
+	require.NotEqual(t, forward(other, "west", "America/Los_Angeles"), forward(other, "east", "Europe/Warsaw"))
+	require.Equal(t, []string{"west", "east"}, probe.calls)
+}
+
 func TestRequestTimezoneEgressDefaultSettings(t *testing.T) {
 	original := localeTestBody([]string{"<environment_context><timezone>Asia/Shanghai</timezone></environment_context>"}, nil)
 	for _, tc := range []struct {

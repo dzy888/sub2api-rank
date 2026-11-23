@@ -14,6 +14,7 @@ import (
 
 const DefaultOpenAIRequestTimezone = "Asia/Singapore"
 const openAIRequestTimezoneExtraKey = "openai_request_timezone"
+const openAIRequestTimezoneModeExtraKey = "openai_request_timezone_mode"
 
 //go:embed openai_request_timezones.txt
 var openAIRequestTimezoneNames string
@@ -38,6 +39,13 @@ func ValidateOpenAIRequestTimezoneExtra(platform string, extra map[string]any) e
 		return nil
 	}
 	raw, exists := extra[openAIRequestTimezoneExtraKey]
+	if rawMode := extra[openAIRequestTimezoneModeExtraKey]; rawMode != nil {
+		mode, ok := rawMode.(string)
+		name, _ := raw.(string)
+		if !ok || (mode != "" && (mode != "fixed" || platform != PlatformOpenAI || !isAllowedOpenAIRequestTimezone(name))) {
+			return infraerrors.New(http.StatusBadRequest, "INVALID_OPENAI_REQUEST_TIMEZONE", "fixed request timezone mode requires an allowed IANA timezone on an OpenAI account")
+		}
+	}
 	if !exists || raw == nil {
 		return nil
 	}
@@ -46,6 +54,11 @@ func ValidateOpenAIRequestTimezoneExtra(platform string, extra map[string]any) e
 		return infraerrors.New(http.StatusBadRequest, "INVALID_OPENAI_REQUEST_TIMEZONE", "openai_request_timezone must be an allowed IANA timezone for an OpenAI account")
 	}
 	return nil
+}
+
+func (account *Account) hasFixedOpenAIRequestTimezone() bool {
+	return account != nil && account.IsOpenAI() && account.getExtraString(openAIRequestTimezoneModeExtraKey) == "fixed" &&
+		isAllowedOpenAIRequestTimezone(account.getExtraString(openAIRequestTimezoneExtraKey))
 }
 
 func isAllowedOpenAIRequestTimezone(name string) bool {

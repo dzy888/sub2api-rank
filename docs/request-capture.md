@@ -30,6 +30,8 @@
 
 每条样本在权限为 `0700` 的目录内保存 `ingress.json`、`upstream.json` 和 `metadata.json`，文件权限为 `0600`。上游正文取自出口时区等改写之后、HTTP 编码之前。元数据记录请求 ID 和同一次采集内可比对的会话指纹，认证头不写入磁盘。两份正文保留复现请求的完整内容，部署时需给采集目录设置清理时间。未配置环境变量时关闭。
 
+如果采集确认代理出口改变了正文前缀，可以为对应 OpenAI 账号设置 `extra.openai_request_timezone_mode: "fixed"` 和 `extra.openai_request_timezone: "Asia/Shanghai"`。开启全局时区改写时，这个账号的固定时区优先于全局「时区跟随出口」。省略或清空 `openai_request_timezone_mode` 即恢复继承全局策略。固定模式只控制时区改写，代理分流和并发设置走原路径。
+
 ## 范围与保护
 
 - 用户按认证用户 ID, 分组按入口 API Key 分组匹配, 额外记录最终路由分组.

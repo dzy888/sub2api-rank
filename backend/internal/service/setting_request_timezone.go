@@ -81,12 +81,16 @@ func (s *SettingService) InvalidateOpenAIRequestTimezoneEnabledCache() {
 	s.openAIRequestTimezoneEnabledCache.Store(&cachedOpenAIRequestTimezoneEnabled{expiresAt: 0})
 }
 
+func (s *OpenAIGatewayService) requestTimezoneFollowsEgress(ctx context.Context, account *Account) bool {
+	return !account.hasFixedOpenAIRequestTimezone() && s.settingService.GetOpenAIRequestTimezoneAuto(ctx, false)
+}
+
 func (s *OpenAIGatewayService) normalizeRequestTimezone(ctx context.Context, account *Account, body []byte, transport string) []byte {
 	if account == nil || !account.IsOpenAI() || s == nil || !s.settingService.GetOpenAIRequestTimezoneEnabled(ctx, false) {
 		return body
 	}
 	// Automatic mode must wait until transport routing has selected the actual egress.
-	if s.settingService.GetOpenAIRequestTimezoneAuto(ctx, false) {
+	if s.requestTimezoneFollowsEgress(ctx, account) {
 		return body
 	}
 	return normalizeOpenAIRequestLocale(ctx, account, body, transport)
