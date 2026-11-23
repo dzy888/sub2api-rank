@@ -89,8 +89,15 @@ func SetBPSStaticRequestGroups(groups map[int64][]int64) {
 	defer m.bpsMu.Unlock()
 	m.bpsRequests.groups = next
 	for id, a := range m.bpsRequests.accounts {
-		if _, ok := next[id]; !ok && len(a.active) == 0 {
-			delete(m.bpsRequests.accounts, id)
+		if _, ok := next[id]; !ok {
+			if len(a.active) == 0 {
+				delete(m.bpsRequests.accounts, id)
+			}
+			for key, binding := range m.bpsRequests.sessions {
+				if key.accountID == id && binding.active == 0 {
+					delete(m.bpsRequests.sessions, key)
+				}
+			}
 		}
 	}
 }

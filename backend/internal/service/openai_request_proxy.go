@@ -178,7 +178,8 @@ func withOpenAIRequestProxySession(ctx context.Context, c *gin.Context, account 
 	if value == "" {
 		return ctx
 	}
-	return context.WithValue(ctx, openAIRequestProxySessionKey{}, fmt.Sprintf("%d:%x", apiKeyID, sha256.Sum256([]byte(value))))
+	scope := fmt.Sprintf("%d:%x", apiKeyID, sha256.Sum256([]byte(value)))
+	return context.WithValue(ctx, openAIRequestProxySessionKey{}, scope)
 }
 
 func writeOpenAIRequestProxyError(c *gin.Context, code, message string) error {

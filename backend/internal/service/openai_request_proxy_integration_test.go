@@ -172,34 +172,42 @@ func TestOpenAIRequestProxyForwardSameSessionDistributesSixThroughThree(t *testi
 }
 
 func TestOpenAIRequestProxyForwardSessionAffinityPinsAuthenticatedResponses(t *testing.T) {
-	seen := make(chan int, 3)
+	gin.SetMode(gin.TestMode)
 	svc, account := localBPSRequestProxyFixture(t, 3, func(id int, w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
-		seen <- id
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, bpsRequestCompletedWire)
+		t.Errorf("selector-only fixture unexpectedly sent a business request to proxy %d", id)
 	})
 	account.Extra["openai_excel_bps"] = false
 	account.Extra["openai_proxy_mode"] = "request"
-	account.Extra["openai_proxy_ids"] = []int64{1, 2}
+	account.Extra["openai_proxy_ids"] = []int64{1, 2, 3}
 	account.Extra[openAIRequestProxySessionAffinityExtra] = true
 
-	for i, keyID := range []int64{100, 100, 101} {
-		body := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":"turn %d","stream":true,"prompt_cache_key":"moving-hint-%d"}`, i, i))
-		rec := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(rec)
-		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body)).WithContext(t.Context())
-		c.Request.Header.Set("thread-id", "same-declared-thread")
-		c.Set("api_key", &APIKey{ID: keyID})
-		result, err := svc.Forward(c.Request.Context(), c, account, body)
+	acquire := func(apiKeyID int64, threadID, input string) int64 {
+		body := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":%q,"stream":true,"prompt_cache_key":"moving-hint"}`, input))
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+		c.Request.Header.Set("thread-id", threadID)
+		c.Set("api_key", &APIKey{ID: apiKeyID})
+		ctx := withOpenAIRequestProxySession(c.Request.Context(), c, account, body)
+		require.NotEmpty(t, ctx.Value(openAIRequestProxySessionKey{}))
+		routed, release, err := svc.beginOpenAIRequestProxy(ctx, c, account)
 		require.NoError(t, err)
-		require.NotNil(t, result)
-		require.Equal(t, http.StatusOK, rec.Code)
+		route, ok := openAIRequestProxyFromContext(routed, account.ID)
+		require.True(t, ok)
+		id := route.lease.ProxyID
+		release()
+		return id
 	}
-	first, second, otherKey := <-seen, <-seen, <-seen
-	require.Contains(t, []int{1, 2}, first)
+
+	first := acquire(100, "thread-a", "first turn")
+	second := acquire(100, "thread-a", "compacted continuation")
+	otherSession := acquire(100, "thread-b", "independent session")
+	otherKey := acquire(101, "thread-a", "same thread, another key")
+	nextTurn := acquire(100, "thread-a", "another continuation")
 	require.Equal(t, first, second)
-	require.Equal(t, 3-first, otherKey)
+	require.NotEqual(t, first, otherSession, "new sessions should spread over available exits")
+	require.NotEqual(t, otherSession, otherKey, "API keys must not share a session binding")
+	require.NotEqual(t, first, otherKey, "another API key must receive an independent binding")
+	require.Equal(t, first, nextTurn)
 }
 
 func TestOpenAIRequestProxyForwardCancellationReleasesExitWhileOtherStreamsStayBusy(t *testing.T) {

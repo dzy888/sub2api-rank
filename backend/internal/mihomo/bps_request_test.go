@@ -137,6 +137,22 @@ func TestBPSRequestPoolSessionLeaseRebindsOnlyAfterActiveRequestCloses(t *testin
 	require.Equal(t, remaining, next.ProxyID)
 }
 
+func TestBPSRequestSessionBindingsPruneRemovedAccountPools(t *testing.T) {
+	bpsStaticTestPool(t, func(context.Context, string) error { return nil })
+	SetBPSStaticProxyRecords([]BPSStaticProxy{{ID: 1, URL: "http://one.invalid:8080"}})
+	SetBPSStaticRequestGroups(map[int64][]int64{300: {1}})
+	WarmBPSPools(t.Context(), 0, 1)
+	lease, err := AcquireBPSStaticSessionRequestLease(t.Context(), "session", 300, []int64{1})
+	require.NoError(t, err)
+	lease.Release()
+
+	SetBPSStaticRequestGroups(map[int64][]int64{301: {1}})
+	bpsStaticManager.bpsMu.Lock()
+	_, exists := bpsStaticManager.bpsRequests.sessions[bpsRequestSessionKey{accountID: 300, scope: "session"}]
+	bpsStaticManager.bpsMu.Unlock()
+	require.False(t, exists)
+}
+
 func TestBPSRequestPoolAccountsKeepIndependentSelectedGroupsAndLoads(t *testing.T) {
 	bpsStaticTestPool(t, func(context.Context, string) error { return nil })
 	SetBPSStaticProxyRecords([]BPSStaticProxy{{ID: 1, URL: "http://one.invalid:8080"}, {ID: 2, URL: "http://two.invalid:8080"}, {ID: 3, URL: "http://three.invalid:8080"}})

@@ -16,6 +16,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestOpenAIRequestProxyAffinityRequiresExplicitStableIdentityAndOptIn(t *testing.T) {
+	account := &Account{ID: 3901, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Extra: map[string]any{OpenAIProxyModeKey: OpenAIProxyModeRequest, OpenAIProxyIDsKey: []int64{1}}}
+	makeContext := func(apiKeyID int64, thread string) *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		c.Request.Header.Set("thread-id", thread)
+		c.Set("api_key", &APIKey{ID: apiKeyID})
+		return c
+	}
+	body := []byte("{\"model\":\"gpt-6.1-sol\",\"input\":\"turn\"}")
+
+	c := makeContext(100, "stable-thread")
+	require.False(t, account.requestProxySessionAffinityEnabled(), "existing request mode remains per-request unless explicitly opted in")
+	require.Nil(t, withOpenAIRequestProxySession(c.Request.Context(), c, account, body).Value(openAIRequestProxySessionKey{}))
+
+	account.Extra[openAIRequestProxySessionAffinityExtra] = true
+	first := withOpenAIRequestProxySession(c.Request.Context(), c, account, body).Value(openAIRequestProxySessionKey{})
+	require.NotNil(t, first)
+	changedTurn := withOpenAIRequestProxySession(c.Request.Context(), c, account, []byte("{\"model\":\"gpt-6.1-sol\",\"input\":\"later turn\"}")).Value(openAIRequestProxySessionKey{})
+	require.Equal(t, first, changedTurn, "thread identity must survive changes to request content")
+	otherKey := makeContext(101, "stable-thread")
+	require.NotEqual(t, first, withOpenAIRequestProxySession(otherKey.Request.Context(), otherKey, account, body).Value(openAIRequestProxySessionKey{}))
+	otherThread := makeContext(100, "another-thread")
+	require.NotEqual(t, first, withOpenAIRequestProxySession(otherThread.Request.Context(), otherThread, account, body).Value(openAIRequestProxySessionKey{}))
+	anonymous := makeContext(100, "")
+	require.Nil(t, withOpenAIRequestProxySession(anonymous.Request.Context(), anonymous, account, body).Value(openAIRequestProxySessionKey{}))
+}
+
 func TestOpenAIRequestProxySuccessTracesSelectedExit(t *testing.T) {
 	observed := make(chan int, 1)
 	svc, account := localBPSRequestProxyFixture(t, 2, func(id int, w http.ResponseWriter, r *http.Request) {
