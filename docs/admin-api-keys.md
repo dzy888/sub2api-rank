@@ -104,7 +104,11 @@ Content-Type: application/json
 
 完整管理员可在账号 `extra` 中另设 `openai_request_proxy_session_affinity: true`，让 HTTP Responses 在所选代理组内按会话保持出口。新会话继续按在途负载分配，缺少有效会话标识的请求仍逐次分配。绑定按账号和 API Key 隔离，空闲 30 分钟或进程重启后重新分配。代理失效后，待该会话已有请求结束，再从配置的健康出口重选。
 
+受限管理 Key 可在具有 `accounts.network` 的更新请求中同时写入和回读此布尔字段。仅对具有有效 OpenAI OAuth `request` 代理组的账号接受 `true`。关闭代理组时须显式写入 `false` 或移除字段。
+
 Push 的规则应包含目标分组、平台 `openai`、类型 `oauth`，以及 `accounts.network`、`accounts.read`；预检账号清理还需要 `accounts.delete`。这些配置须由管理员在部署后为对应 Key 授权。
+
+Push 可在同一账号更新接口的 `extra` 中设置 `openai_request_timezone_mode: "fixed"` 和 `openai_request_timezone: "Asia/Singapore"`。时区须在 Sub2API 支持的 IANA 时区列表内。暂停账号也可更新，且可用 `accounts.read` 回读这两个字段后再启用调度。
 
 ## Codex 会话导入
 

@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOpenAIRequestProxyAffinityRequiresExplicitStableIdentityAndOptIn(t *testing.T) {
+func TestOpenAIRequestProxyAffinityUsesStableIdentityAndOptIn(t *testing.T) {
 	account := &Account{ID: 3901, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
 		Extra: map[string]any{OpenAIProxyModeKey: OpenAIProxyModeRequest, OpenAIProxyIDsKey: []int64{1}}}
 	makeContext := func(apiKeyID int64, thread string) *gin.Context {
@@ -32,7 +32,7 @@ func TestOpenAIRequestProxyAffinityRequiresExplicitStableIdentityAndOptIn(t *tes
 	require.False(t, account.requestProxySessionAffinityEnabled(), "existing request mode remains per-request unless explicitly opted in")
 	require.Nil(t, withOpenAIRequestProxySession(c.Request.Context(), c, account, body).Value(openAIRequestProxySessionKey{}))
 
-	account.Extra[openAIRequestProxySessionAffinityExtra] = true
+	account.Extra[OpenAIProxySessionAffinityKey] = true
 	first := withOpenAIRequestProxySession(c.Request.Context(), c, account, body).Value(openAIRequestProxySessionKey{})
 	require.NotNil(t, first)
 	changedTurn := withOpenAIRequestProxySession(c.Request.Context(), c, account, []byte("{\"model\":\"gpt-6.1-sol\",\"input\":\"later turn\"}")).Value(openAIRequestProxySessionKey{})
@@ -42,7 +42,7 @@ func TestOpenAIRequestProxyAffinityRequiresExplicitStableIdentityAndOptIn(t *tes
 	otherThread := makeContext(100, "another-thread")
 	require.NotEqual(t, first, withOpenAIRequestProxySession(otherThread.Request.Context(), otherThread, account, body).Value(openAIRequestProxySessionKey{}))
 	anonymous := makeContext(100, "")
-	require.Nil(t, withOpenAIRequestProxySession(anonymous.Request.Context(), anonymous, account, body).Value(openAIRequestProxySessionKey{}))
+	require.Nil(t, withOpenAIRequestProxySession(anonymous.Request.Context(), anonymous, account, []byte(`{}`)).Value(openAIRequestProxySessionKey{}))
 }
 
 func TestOpenAIRequestProxySuccessTracesSelectedExit(t *testing.T) {

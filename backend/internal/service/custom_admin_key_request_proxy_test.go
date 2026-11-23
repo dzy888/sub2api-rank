@@ -16,6 +16,8 @@ func TestScopedRequestProxyExtraRequiresNetworkAndKeepsCreateContract(t *testing
 		`{"extra":{"openai_proxy_mode":"single"}}`,
 		`{"extra":{"openai_proxy_ids":[22,11]}}`,
 		`{"extra":{"openai_proxy_mode":"request","openai_proxy_ids":[11],"openai_oauth_responses_websockets_v2_mode":"ctx_pool"}}`,
+		`{"extra":{"openai_proxy_mode":"request","openai_proxy_ids":[11],"openai_request_proxy_session_affinity":true}}`,
+		`{"extra":{"openai_request_timezone_mode":"fixed","openai_request_timezone":"Asia/Singapore"}}`,
 	} {
 		t.Run(body, func(t *testing.T) {
 			var fields map[string]json.RawMessage
@@ -41,6 +43,11 @@ func TestScopedRequestProxyExtraRejectsMalformedAndForeignFields(t *testing.T) {
 		`{"openai_proxy_mode":"request","openai_proxy_ids":[11],"credential_owner_account_id":123}`,
 		`{"openai_proxy_mode":"request","openai_proxy_ids":[11],"openai_connections_managed":false}`,
 		`{"openai_proxy_mode":"request","openai_proxy_ids":[11],"openai_excel_bps_proxy_ids":[22]}`,
+		`{"openai_proxy_mode":"request","openai_proxy_ids":[11],"openai_request_proxy_session_affinity":"true"}`,
+		`{"openai_request_timezone_mode":"auto"}`,
+		`{"openai_request_timezone_mode":true}`,
+		`{"openai_request_timezone":"Mars/Olympus"}`,
+		`{"openai_request_timezone":null}`,
 	} {
 		t.Run(extra, func(t *testing.T) {
 			_, err := scopedAccountFieldPermissions(map[string]json.RawMessage{"extra": json.RawMessage(extra)}, false)
@@ -52,16 +59,22 @@ func TestScopedRequestProxyExtraRejectsMalformedAndForeignFields(t *testing.T) {
 func TestScopedRequestProxyReadbackOnlyExposesSafeFields(t *testing.T) {
 	a := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{
 		OpenAIProxyModeKey: OpenAIProxyModeRequest, OpenAIProxyIDsKey: []int64{11, 22},
+		OpenAIProxySessionAffinityKey: true,
+		openAIRequestTimezoneExtraKey: "Asia/Singapore", openAIRequestTimezoneModeExtraKey: "fixed",
 		"openai_oauth_responses_websockets_v2_mode": "ctx_pool", "private": "PRIVATE_VALUE", "password": "PRIVATE_PASSWORD",
 	}}
 	require.Equal(t, map[string]any{
-		OpenAIProxyModeKey: OpenAIProxyModeRequest, OpenAIProxyIDsKey: []int64{11, 22},
+		OpenAIProxyModeKey: OpenAIProxyModeRequest, OpenAIProxyIDsKey: []int64{11, 22}, OpenAIProxySessionAffinityKey: true,
+		openAIRequestTimezoneExtraKey: "Asia/Singapore", openAIRequestTimezoneModeExtraKey: "fixed",
 		"openai_oauth_responses_websockets_v2_mode": "ctx_pool",
 	}, ScopedAdminSafeExtra(a))
 	a.Extra[OpenAIProxyIDsKey] = []any{"11"}
 	require.NotContains(t, ScopedAdminSafeExtra(a), OpenAIProxyIDsKey)
 	a.Type = AccountTypeAPIKey
 	require.NotContains(t, ScopedAdminSafeExtra(a), OpenAIProxyModeKey)
+	require.NotContains(t, ScopedAdminSafeExtra(a), openAIRequestTimezoneModeExtraKey)
 	a.Type, a.Platform = AccountTypeOAuth, PlatformAnthropic
 	require.NotContains(t, ScopedAdminSafeExtra(a), OpenAIProxyModeKey)
+	require.NotContains(t, ScopedAdminSafeExtra(a), OpenAIProxySessionAffinityKey)
+	require.NotContains(t, ScopedAdminSafeExtra(a), openAIRequestTimezoneExtraKey)
 }

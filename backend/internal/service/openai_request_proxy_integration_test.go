@@ -179,7 +179,7 @@ func TestOpenAIRequestProxyForwardSessionAffinityPinsAuthenticatedResponses(t *t
 	account.Extra["openai_excel_bps"] = false
 	account.Extra["openai_proxy_mode"] = "request"
 	account.Extra["openai_proxy_ids"] = []int64{1, 2, 3}
-	account.Extra[openAIRequestProxySessionAffinityExtra] = true
+	account.Extra[OpenAIProxySessionAffinityKey] = true
 
 	acquire := func(apiKeyID int64, threadID, input string) int64 {
 		body := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":%q,"stream":true,"prompt_cache_key":"moving-hint"}`, input))

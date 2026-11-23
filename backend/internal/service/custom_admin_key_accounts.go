@@ -358,6 +358,18 @@ func validateScopedNetworkUpdateExtra(extra map[string]any) error {
 			if _, valid := parseExcelBPSProxyIDs(v); !valid {
 				return fmt.Errorf("invalid OpenAI proxy IDs")
 			}
+		case OpenAIProxySessionAffinityKey:
+			if _, ok := v.(bool); !ok {
+				return fmt.Errorf("invalid OpenAI proxy session affinity")
+			}
+		case openAIRequestTimezoneExtraKey:
+			if zone, ok := v.(string); !ok || (zone != "" && !isAllowedOpenAIRequestTimezone(zone)) {
+				return fmt.Errorf("invalid OpenAI request timezone")
+			}
+		case openAIRequestTimezoneModeExtraKey:
+			if mode, ok := v.(string); !ok || (mode != "" && mode != "fixed") {
+				return fmt.Errorf("invalid OpenAI request timezone mode")
+			}
 		default:
 			if err := validateScopedNetworkExtra(map[string]any{k: v}); err != nil {
 				return err
@@ -376,7 +388,10 @@ func ScopedAdminSafeExtra(a *Account) map[string]any {
 		}
 	}
 	if a.IsOpenAIOAuth() {
-		for _, k := range []string{OpenAIProxyModeKey, OpenAIProxyIDsKey} {
+		for _, k := range []string{
+			OpenAIProxyModeKey, OpenAIProxyIDsKey, OpenAIProxySessionAffinityKey,
+			openAIRequestTimezoneExtraKey, openAIRequestTimezoneModeExtraKey,
+		} {
 			if v, ok := a.Extra[k]; ok && validateScopedNetworkUpdateExtra(map[string]any{k: v}) == nil {
 				out[k] = v
 			}

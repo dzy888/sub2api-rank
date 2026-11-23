@@ -283,7 +283,7 @@ func ProxyReplicaExtra(extra map[string]any) (map[string]any, error) {
 	delete(out, ProxyReplicaOperationKey)
 	// Each replica owns a fixed exit and concurrency limit. Never inherit the
 	// source's request pool, which would route around that binding.
-	for _, key := range []string{OpenAIProxyModeKey, OpenAIProxyIDsKey, ExcelBPSProxyModeKey, ExcelBPSProxyIDsKey} {
+	for _, key := range []string{OpenAIProxyModeKey, OpenAIProxyIDsKey, OpenAIProxySessionAffinityKey, ExcelBPSProxyModeKey, ExcelBPSProxyIDsKey} {
 		delete(out, key)
 	}
 	for key := range out {

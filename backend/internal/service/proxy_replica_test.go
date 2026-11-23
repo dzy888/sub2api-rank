@@ -228,7 +228,7 @@ func TestProxyReplicaConversionFencesOldSourceAdmissionSnapshot(t *testing.T) {
 }
 
 func TestProxyReplicaExtraDoesNotDuplicateQuotaOrTickets(t *testing.T) {
-	extra, err := ProxyReplicaExtra(map[string]any{ProxyReplicaSourceKey: true, "codex_7d_used_percent": float64(100), "codex_turn_ticket:example": "synthetic-ticket", "openai_auto_reset_credit_enabled": true, "crs_account_id": "external", "keep_config": true})
+	extra, err := ProxyReplicaExtra(map[string]any{ProxyReplicaSourceKey: true, OpenAIProxySessionAffinityKey: true, "codex_7d_used_percent": float64(100), "codex_turn_ticket:example": "synthetic-ticket", "openai_auto_reset_credit_enabled": true, "crs_account_id": "external", "keep_config": true})
 	require.NoError(t, err)
 	require.Equal(t, map[string]any{"keep_config": true}, extra)
 }
@@ -243,6 +243,7 @@ func TestProxyReplicaKeepsBoundExitWithRequestPoolSettings(t *testing.T) {
 		}
 		replica.Extra[modeKey] = "request"
 		replica.Extra[idsKey] = []int64{22, 33}
+		replica.Extra[OpenAIProxySessionAffinityKey] = true
 		require.False(t, replica.OpenAIRequestProxyEnabled())
 		require.False(t, replica.ExcelBPSRequestProxyEnabled())
 		svc := &adminServiceImpl{}
@@ -251,8 +252,10 @@ func TestProxyReplicaKeepsBoundExitWithRequestPoolSettings(t *testing.T) {
 		require.NoError(t, err)
 		require.NotContains(t, extra, modeKey)
 		require.NotContains(t, extra, idsKey)
+		require.NotContains(t, extra, OpenAIProxySessionAffinityKey)
 		require.Equal(t, int64(11), *replica.ProxyID)
 		require.Equal(t, "request", replica.Extra[modeKey], "copy must preserve the source configuration")
+		delete(replica.Extra, OpenAIProxySessionAffinityKey)
 		if legacy {
 			replica.Extra[modeKey] = ExcelBPSProxyModeSession
 		} else {

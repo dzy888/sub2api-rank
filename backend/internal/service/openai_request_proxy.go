@@ -19,7 +19,6 @@ type openAIRequestProxyContextKey struct{}
 type openAIRequestProxySessionKey struct{}
 
 const openAIRequestProxyOpsKey = "openai_request_proxy_ops_route"
-const openAIRequestProxySessionAffinityExtra = "openai_request_proxy_session_affinity"
 
 type openAIRequestProxyRoute struct {
 	accountID   int64
@@ -150,15 +149,11 @@ func (s *OpenAIGatewayService) beginOpenAIRequestProxy(ctx context.Context, c *g
 }
 
 func (a *Account) requestProxySessionAffinityEnabled() bool {
-	if !a.OpenAIRequestProxyEnabled() {
-		return false
-	}
-	enabled, _ := a.Extra[openAIRequestProxySessionAffinityExtra].(bool)
-	return enabled
+	return a.OpenAIRequestProxySessionAffinityEnabled()
 }
 
-// Capture the declared identity before request transformations. A content-derived
-// account scheduling hash is too broad to use as an egress binding.
+// Capture the declared identity before request transformations. When clients omit
+// one, reuse the stable-prefix seed already used by account scheduling.
 func withOpenAIRequestProxySession(ctx context.Context, c *gin.Context, account *Account, body []byte) context.Context {
 	if !account.requestProxySessionAffinityEnabled() {
 		return ctx
@@ -174,6 +169,11 @@ func withOpenAIRequestProxySession(ctx context.Context, c *gin.Context, account 
 		value = identity.identity.value
 	case OpenAIClientSessionIdentityMissing:
 		value = sanitizeSessionID(explicitOpenAISessionID(c, body))
+		if value == "" {
+			if seed := deriveOpenAIAnchoredContentSessionSeed(body); seed != "" {
+				value = "content:" + seed
+			}
+		}
 	}
 	if value == "" {
 		return ctx
