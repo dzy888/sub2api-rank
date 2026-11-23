@@ -70,6 +70,18 @@ func DeriveSessionHashFromSeed(seed string) string {
 	return currentHash
 }
 
+// DeriveSessionHashFromSeedWithContext keeps account selection, legacy Redis
+// fallback and OAuth connection affinity on the same seed. Callers overriding
+// a content-derived hash must update all three together.
+func DeriveSessionHashFromSeedWithContext(c *gin.Context, seed string) string {
+	currentHash, legacyHash := deriveOpenAISessionHashes(seed)
+	attachOpenAILegacySessionHashToGin(c, legacyHash)
+	if c != nil {
+		c.Set("openai_auth_connection_session_hash", currentHash)
+	}
+	return currentHash
+}
+
 func deriveOpenAISessionHashes(sessionID string) (currentHash string, legacyHash string) {
 	normalized := strings.TrimSpace(sessionID)
 	if normalized == "" {

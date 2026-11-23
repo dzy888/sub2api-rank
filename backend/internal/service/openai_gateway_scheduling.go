@@ -142,12 +142,7 @@ func (s *OpenAIGatewayService) GenerateExplicitSessionHash(c *gin.Context, body 
 		return ""
 	}
 
-	currentHash, legacyHash := deriveOpenAISessionHashes(sessionID)
-	attachOpenAILegacySessionHashToGin(c, legacyHash)
-	if c != nil {
-		c.Set("openai_auth_connection_session_hash", currentHash)
-	}
-	return currentHash
+	return DeriveSessionHashFromSeedWithContext(c, sessionID)
 }
 
 // GenerateSessionHash generates a sticky-session hash for OpenAI requests.
@@ -159,7 +154,8 @@ func (s *OpenAIGatewayService) GenerateExplicitSessionHash(c *gin.Context, body 
 //  4. Header: x-conversation-id (CodeBuddy)
 //  5. Header: x-grok-conv-id (Grok groups only)
 //  6. Body:   prompt_cache_key
-//  7. Body:   content-based fallback (model + system + tools + first user message)
+//  7. OpenAI client thread/session identity (headers or client_metadata)
+//  8. Body:   content-based fallback (model + system + tools + first user message)
 //
 // Grok sticky affinity is intentionally separate from the upstream
 // prompt_cache_key identity (resolveGrokCacheIdentity): sticky pins an OAuth
@@ -173,6 +169,21 @@ func (s *OpenAIGatewayService) GenerateSessionHash(c *gin.Context, body []byte) 
 	}
 
 	sessionID := explicitOpenAIRequestSessionID(c, body)
+	if sessionID == "" && !isGrokRequestContext(c) {
+		// WS state already recognizes these identities. Account selection must
+		// also honor them before content fallback, or compaction/tool changes
+		// can move an otherwise stable conversation to a different account.
+		// Keep this routing-only: ExtractSessionID and upstream cache keys retain
+		// their existing semantics and explicit header/cache-key precedence.
+		identity := resolveOpenAIClientSessionIdentity(c, body)
+		switch identity.metadata.Status {
+		case OpenAIClientSessionIdentityResolved:
+			sessionID = identity.identity.value
+		case OpenAIClientSessionIdentityMissing:
+			// Older Codex clients may declare their thread only in turn metadata.
+			sessionID = sanitizeSessionID(resolveOpenAIWSClientThreadID(c, body))
+		}
+	}
 	if sessionID == "" && len(body) > 0 {
 		sessionID = deriveOpenAIContentSessionSeed(body)
 	}
@@ -184,12 +195,7 @@ func (s *OpenAIGatewayService) GenerateSessionHash(c *gin.Context, body []byte) 
 		sessionID = grokStickyAffinitySeed(sessionID, body)
 	}
 
-	currentHash, legacyHash := deriveOpenAISessionHashes(sessionID)
-	attachOpenAILegacySessionHashToGin(c, legacyHash)
-	if c != nil {
-		c.Set("openai_auth_connection_session_hash", currentHash)
-	}
-	return currentHash
+	return DeriveSessionHashFromSeedWithContext(c, sessionID)
 }
 
 // grokStickyAffinitySeed scopes sticky routing by model without changing the
@@ -223,12 +229,7 @@ func (s *OpenAIGatewayService) GenerateSessionHashWithFallback(c *gin.Context, b
 		return ""
 	}
 
-	currentHash, legacyHash := deriveOpenAISessionHashes(seed)
-	attachOpenAILegacySessionHashToGin(c, legacyHash)
-	if c != nil {
-		c.Set("openai_auth_connection_session_hash", currentHash)
-	}
-	return currentHash
+	return DeriveSessionHashFromSeedWithContext(c, seed)
 }
 
 func resolveOpenAIUpstreamOriginator(c *gin.Context, isOfficialClient bool) string {

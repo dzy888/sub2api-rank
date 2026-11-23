@@ -156,7 +156,13 @@ func (s *OpenAIGatewayService) doOpenAIProxyAttempt(req *http.Request, account *
 	defer func() { observeAttempt(resp, err) }()
 	defer func() { s.rateLimitService.observeQualityResponse(req.Context(), account, resp, err) }()
 	defer func() { controlledHTTPResponse(req.Context(), resp) }()
-	req, timingTrace := requesttiming.StartAttempt(req, account.ID, target.proxyID)
+	traceProxyID := target.proxyID
+	if route, scoped := openAIRequestProxyFromContext(req.Context(), account.ID); scoped && route.proxy == target.url {
+		// The selected proxy is held by the request lease, not Account.Proxy.
+		// Preserve its ID in successful traces as well as in error attribution.
+		traceProxyID = route.lease.ProxyID
+	}
+	req, timingTrace := requesttiming.StartAttempt(req, account.ID, traceProxyID)
 	defer func() { timingTrace.Response(resp, err) }()
 	defer func() {
 		if err != nil && target.proxyID >= 0 {

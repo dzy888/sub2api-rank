@@ -25,6 +25,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/requestmodel"
+	"github.com/Wei-Shaw/sub2api/internal/requestcapture"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -758,6 +759,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 
 	setOpsRequestContext(c, "", false)
+	c.Request = requestcapture.BeginCacheDiagnostic(c.Request, apiKey.ID, body)
 	sessionHashBody := body
 	body, ok = h.normalizeOpenAIResponsesCompactRequest(c, reqLog, body)
 	if !ok {
@@ -2136,7 +2138,15 @@ func resolveOpenAIMessagesMetadataSession(c *gin.Context, sessionHash, promptCac
 	// session_id，否则会改变现有 Messages→Codex 缓存滚动语义。
 	if promptCacheKey == "" {
 		if claudeSessionID := service.ClaudeCodeSessionIDFromHeader(c); claudeSessionID != "" {
-			return service.DeriveSessionHashFromSeed(claudeSessionID), promptCacheKey
+			return service.DeriveSessionHashFromSeedWithContext(c, claudeSessionID), promptCacheKey
+		}
+		// Recognized Claude Code metadata carries the same explicit session as
+		// the header. It must outrank a content-derived hash after compaction or
+		// tool changes. An opaque user_id alone is not a conversation identity.
+		if metadata := service.ParseMetadataUserID(gjson.GetBytes(body, "metadata.user_id").String()); metadata != nil {
+			if sessionID := strings.TrimSpace(metadata.SessionID); sessionID != "" {
+				return service.DeriveSessionHashFromSeedWithContext(c, sessionID), promptCacheKey
+			}
 		}
 	}
 	if sessionHash != "" {
@@ -2144,7 +2154,7 @@ func resolveOpenAIMessagesMetadataSession(c *gin.Context, sessionHash, promptCac
 	}
 	if userID := strings.TrimSpace(gjson.GetBytes(body, "metadata.user_id").String()); userID != "" {
 		seed := reqModel + "-" + userID
-		sessionHash = service.DeriveSessionHashFromSeed(seed)
+		sessionHash = service.DeriveSessionHashFromSeedWithContext(c, seed)
 	}
 	return sessionHash, promptCacheKey
 }

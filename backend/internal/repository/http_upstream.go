@@ -413,6 +413,9 @@ func doUpstreamRequest(client *http.Client, req *http.Request) (result *http.Res
 		cancel()
 		return resp, err
 	}
+	if resp != nil && resp.StatusCode == http.StatusOK {
+		requestcapture.ObserveCacheDiagnosticRequest(req, requestcapture.AccountFromContext(req.Context()))
+	}
 	timingTrace.Headers(resp)
 	requesttiming.Encoding(req.Context(), resp)
 	if !resp.Uncompressed {

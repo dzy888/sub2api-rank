@@ -208,7 +208,9 @@ func TestResolveOpenAIMessagesMetadataSession_ClaudeCodeHeaderOverridesContentFa
 	require.NotEqual(t, contentHash1, contentHash2, "different bodies should prove the content fallback differs")
 
 	hash1, cacheKey1 := resolveOpenAIMessagesMetadataSession(c, contentHash1, "", "gpt-5.6-sol", body1)
+	require.Equal(t, hash1, c.GetString("openai_auth_connection_session_hash"))
 	hash2, cacheKey2 := resolveOpenAIMessagesMetadataSession(c, contentHash2, "", "gpt-5.6-sol", body2)
+	require.Equal(t, hash2, c.GetString("openai_auth_connection_session_hash"))
 	require.Equal(t, service.DeriveSessionHashFromSeed("claude-session-001"), hash1)
 	require.Equal(t, hash1, hash2, "the same Claude Code session must keep one sticky account across changed turn bodies")
 	require.Empty(t, cacheKey1, "routing-only fix must not create an upstream prompt cache key")
@@ -237,6 +239,33 @@ func TestResolveOpenAIMessagesMetadataSession_BlankClaudeHeaderKeepsContentFallb
 	hash, cacheKey := resolveOpenAIMessagesMetadataSession(c, "content-hash", "", "gpt-5.6-sol", []byte(`{"metadata":{"user_id":"opaque"}}`))
 	require.Equal(t, "content-hash", hash)
 	require.Empty(t, cacheKey)
+}
+
+func TestResolveOpenAIMessagesMetadataSession_ParsedMetadataOverridesContentFallback(t *testing.T) {
+	const sessionID = "123e4567-e89b-12d3-a456-426614174000"
+	const deviceID = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	for _, version := range []string{"2.1.77", "2.1.78"} {
+		t.Run(version, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			svc := &service.OpenAIGatewayService{}
+			var contentHashes []string
+			for _, input := range []string{"original first turn", "compacted conversation summary"} {
+				body, err := json.Marshal(map[string]any{
+					"model": "gpt-5.1", "messages": []map[string]string{{"role": "user", "content": input}},
+					"metadata": map[string]string{"user_id": service.FormatMetadataUserID(deviceID, "", sessionID, version)},
+				})
+				require.NoError(t, err)
+				contentHash := svc.GenerateSessionHash(c, body)
+				contentHashes = append(contentHashes, contentHash)
+				hash, cacheKey := resolveOpenAIMessagesMetadataSession(c, contentHash, svc.ExtractSessionID(c, body), "gpt-5.1", body)
+				require.Equal(t, service.DeriveSessionHashFromSeed(sessionID), hash, "parsed session must survive content changes and match the Claude session header")
+				require.Equal(t, hash, c.GetString("openai_auth_connection_session_hash"), "OAuth connection affinity must follow the final account session")
+				require.Empty(t, cacheKey, "account affinity must not override upstream cache identity")
+			}
+			require.NotEqual(t, contentHashes[0], contentHashes[1])
+		})
+	}
 }
 
 func TestOpenAIHandleStreamingAwareError_NonStreaming(t *testing.T) {

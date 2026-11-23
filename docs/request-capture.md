@@ -26,6 +26,10 @@
 
 导出 `record.json` 的 `attempts[].route` 可区分下游传输、宿主出站、路由模式、端点类别及回退原因；WS 握手与帧请求使用不同尝试编号。首事件耗时与内容首 token 的口径不同。字段、路由矩阵及成功请求的观测边界见[网关传输诊断](gateway-transport-diagnostics.md)。本功能沿用上面的错误保留策略，不增加成功请求正文留存。
 
+排查 HTTP Responses 的缓存时，可在服务进程启动时单独配置 `SUB2API_CACHE_DIAGNOSTIC`。它是一个 JSON 对象，包含绝对路径 `directory`、正数 `api_key_id` 和 `account_id`、`SUB2API-CACHE-` 开头的 `marker`，以及 RFC 3339 格式的 `until`，窗口最长一小时。仅匹配指定 Key、最新用户输入带标记、且目标账号返回 HTTP 200 的请求。最多采集六条，每阶段不超过 32 MiB。
+
+每条样本在权限为 `0700` 的目录内保存 `ingress.json`、`upstream.json` 和 `metadata.json`，文件权限为 `0600`。上游正文取自出口时区等改写之后、HTTP 编码之前。元数据记录请求 ID 和同一次采集内可比对的会话指纹，认证头不写入磁盘。两份正文保留复现请求的完整内容，部署时需给采集目录设置清理时间。未配置环境变量时关闭。
+
 ## 范围与保护
 
 - 用户按认证用户 ID, 分组按入口 API Key 分组匹配, 额外记录最终路由分组.
