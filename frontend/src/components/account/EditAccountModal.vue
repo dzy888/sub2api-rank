@@ -2078,7 +2078,8 @@
           <ProxyAdBanner />
         </div>
         <OpenAIProxySettings v-if="openaiProxySupported"
-          v-model:mode="openaiProxyMode" v-model:single-proxy-id="form.proxy_id" v-model:proxy-ids="openaiProxyIds"
+          v-model:mode="openaiProxyMode" v-model:session-affinity="openaiProxySessionAffinity"
+          v-model:single-proxy-id="form.proxy_id" v-model:proxy-ids="openaiProxyIds"
           :proxies="proxies" :loading="proxiesLoading" :load-error="proxiesLoadError" :current-account-id="editingAccount.id"
           :user-id="authStore.user?.id" @retry="emit('retry-proxies')" />
         <ProxySelector v-else v-model="form.proxy_id" :proxies="proxies" />
@@ -4754,6 +4755,7 @@ const excelBPSMihomo = ref(false)
 const excelBPSProxySource = ref<'mihomo' | 'ip_pool'>('mihomo')
 const openaiProxyMode = ref<'single' | 'request'>('single')
 const openaiProxyIds = ref<number[]>([])
+const openaiProxySessionAffinity = ref(false)
 const excelBPSCacheCreationAsInput = ref(false)
 const excelBPSAutoDisableOn403 = ref(false)
 const excelBPSAutoRecoverOn403 = ref(false)
@@ -5370,6 +5372,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   excelBPSProxySource.value = 'mihomo'
   openaiProxyMode.value = 'single'
   openaiProxyIds.value = []
+  openaiProxySessionAffinity.value = false
   excelBPSCacheCreationAsInput.value = false
   excelBPSAutoDisableOn403.value = false
   excelBPSAutoRecoverOn403.value = false
@@ -5430,6 +5433,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     excelBPSProxySource.value = extra?.openai_excel_bps_proxy_source === 'ip_pool' ? 'ip_pool' : 'mihomo'
     const hasUnifiedProxyMode = Object.prototype.hasOwnProperty.call(extra ?? {}, 'openai_proxy_mode')
     openaiProxyMode.value = (hasUnifiedProxyMode ? extra?.openai_proxy_mode : extra?.openai_excel_bps_proxy_mode) === 'request' ? 'request' : 'single'
+    openaiProxySessionAffinity.value = extra?.openai_request_proxy_session_affinity === true
     const configuredProxyIds = hasUnifiedProxyMode ? extra?.openai_proxy_ids : extra?.openai_excel_bps_proxy_ids
     openaiProxyIds.value = Array.isArray(configuredProxyIds)
       ? [...new Set(configuredProxyIds.filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0))]
@@ -7225,9 +7229,15 @@ const handleSubmit = async () => {
       if (openaiProxySupported.value) {
         newExtra.openai_proxy_mode = openaiProxyMode.value
         newExtra.openai_proxy_ids = [...openaiProxyIds.value]
+        if (openaiProxyMode.value === 'request' && openaiProxySessionAffinity.value) {
+          newExtra.openai_request_proxy_session_affinity = true
+        } else {
+          delete newExtra.openai_request_proxy_session_affinity
+        }
       } else {
         delete newExtra.openai_proxy_mode
         delete newExtra.openai_proxy_ids
+        delete newExtra.openai_request_proxy_session_affinity
       }
       if (newExtra.openai_excel_bps === true && excelBPSCacheCreationAsInput.value) {
         newExtra.openai_excel_bps_cache_creation_as_input = true

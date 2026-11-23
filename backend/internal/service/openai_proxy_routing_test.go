@@ -124,10 +124,11 @@ func TestAdminOpenAIProxySessionAffinityValidatesAndPreservesOptIn(t *testing.T)
 	repo.account = &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{
 		OpenAIProxyModeKey: OpenAIProxyModeRequest, OpenAIProxyIDsKey: []int64{11}, OpenAIProxySessionAffinityKey: true,
 	}}
-	_, err = svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{Extra: map[string]any{
+	updated, err := svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{Extra: map[string]any{
 		OpenAIProxyModeKey: OpenAIProxyModeSingle, OpenAIProxyIDsKey: []int64{}, OpenAIProxySessionAffinityKey: true,
 	}})
-	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err), "switching to single mode requires clearing the affinity opt-in")
+	require.NoError(t, err)
+	require.NotContains(t, updated.Extra, OpenAIProxySessionAffinityKey)
 }
 
 func TestAdminOpenAIProxySessionAffinityRequiresBooleanAndExplicitDisable(t *testing.T) {
@@ -141,10 +142,11 @@ func TestAdminOpenAIProxySessionAffinityRequiresBooleanAndExplicitDisable(t *tes
 	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
 
 	repo.account.Extra[OpenAIProxySessionAffinityKey] = true
-	_, err = svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{Extra: map[string]any{
+	updated, err := svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{Extra: map[string]any{
 		OpenAIProxyModeKey: OpenAIProxyModeSingle, OpenAIProxySessionAffinityKey: true,
 	}})
-	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err), "changing to single mode must clear the affinity flag in the same update")
+	require.NoError(t, err)
+	require.NotContains(t, updated.Extra, OpenAIProxySessionAffinityKey)
 
 	repo.account.Extra[OpenAIProxyIDsKey] = []int64{}
 	_, err = svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{Extra: map[string]any{

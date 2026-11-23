@@ -419,7 +419,7 @@ func TestOpenAIGatewayService_ClientSessionHeaderPriority(t *testing.T) {
 		require.Equal(t, header.value, svc.ExtractSessionID(c, body), header.name)
 		require.Equal(t, fmt.Sprintf("%016x", xxhash.Sum64String(header.value)), svc.GenerateExplicitSessionHash(c, body), header.name)
 		if header.name != grokConversationIDHeader {
-			require.Equal(t, header.value, explicitOpenAISessionID(c, body), header.name)
+			require.Equal(t, header.value, explicitOpenAIHeaderSessionID(c), header.name)
 		}
 		c.Request.Header.Del(header.name)
 	}

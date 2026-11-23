@@ -209,7 +209,24 @@ func (m *Manager) acquireBPSStaticRequestLease(ctx context.Context, accountID in
 			// SetBPSStaticRequestGroups removes unconfigured idle accounts.
 		})
 	}
-	return &BPSLease{ProxyID: selected[best].ID, ProxyName: selected[best].Name, ProxyURL: m.bpsStatic[best], manager: m, node: best, generation: m.bpsHealthAtLocked(best, now).generation, release: release}, nil
+	return &BPSLease{
+		ProxyID: selected[best].ID, ProxyName: selected[best].Name, ProxyURL: m.bpsStatic[best],
+		SessionBound: binding != nil, manager: m, node: best,
+		generation: m.bpsHealthAtLocked(best, now).generation, release: release,
+	}, nil
+}
+
+// RequestProxyCurrent checks refreshed membership for a long-lived lease.
+// Reachability is checked on acquisition. An active connection can still
+// finish a turn while a transient health observation is being refreshed.
+func (l *BPSLease) RequestProxyCurrent() bool {
+	m := l.manager
+	m.bpsMu.Lock()
+	defer m.bpsMu.Unlock()
+	now := time.Now()
+	record, ok := m.bpsRequests.records[l.ProxyID]
+	return ok && record.URL == l.ProxyURL && (record.ExpiresAt == nil || record.ExpiresAt.After(now)) &&
+		now.Before(m.bpsRequests.refreshedAt.Add(BPSStaticRequestMembershipMaxAge))
 }
 
 func leastBusyBPSRequestExit(nodes []string, account *bpsRequestAccount) string {

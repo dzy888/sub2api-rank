@@ -66,13 +66,16 @@ func TestOpenAIRequestProxyCompatibilityUnavailableNeverSends(t *testing.T) {
 	}
 }
 
-func TestOpenAIRequestProxyWebSocketExplicitlyRejectsBeforeUpstream(t *testing.T) {
+func TestOpenAIRequestProxyWebSocketWithoutSelectedLeaseFailsClosed(t *testing.T) {
 	upstream := &httpUpstreamRecorder{}
 	svc := openAIClientToolsTestService(upstream)
+	svc.cfg = newOpenAIWSV2TestConfig()
 	account := excelAccount()
 	account.Extra["openai_excel_bps"] = false
 	account.Extra["openai_proxy_mode"] = "request"
-	account.Extra["openai_proxy_ids"] = []int64{1, 2}
+	account.Extra["openai_proxy_ids"] = []int64{987654321}
+	account.Extra["openai_oauth_responses_websockets_v2_enabled"] = true
+	account.Extra[OpenAIProxySessionAffinityKey] = true
 	serverErr := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := coderws.Accept(w, r, nil)
@@ -83,6 +86,7 @@ func TestOpenAIRequestProxyWebSocketExplicitlyRejectsBeforeUpstream(t *testing.T
 		defer func() { _ = conn.CloseNow() }()
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = r
+		c.Set("api_key", &APIKey{ID: 100})
 		serverErr <- svc.ProxyResponsesWebSocketFromClient(r.Context(), c, conn, account, "test-token", []byte(`{"type":"response.create","model":"gpt-5.4","input":"test"}`), nil)
 	}))
 	defer server.Close()
@@ -95,7 +99,7 @@ func TestOpenAIRequestProxyWebSocketExplicitlyRejectsBeforeUpstream(t *testing.T
 	case err := <-serverErr:
 		var closeErr *OpenAIWSClientCloseError
 		require.ErrorAs(t, err, &closeErr)
-		require.Contains(t, err.Error(), "requires HTTP/SSE")
+		require.Contains(t, err.Error(), "No selected proxy")
 	case <-ctx.Done():
 		t.Fatal("WebSocket request proxy rejection did not finish")
 	}

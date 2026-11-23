@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requesttiming"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -63,4 +65,54 @@ func TestOpenAIRequestProxyAffinityDoesNotInventSeedWithoutStablePrefix(t *testi
 		ctx := withOpenAIRequestProxySession(c.Request.Context(), c, account, body)
 		require.Nil(t, ctx.Value(openAIRequestProxySessionKey{}))
 	}
+}
+
+func TestOpenAIRequestProxyAffinityReusesLegacyCodexThread(t *testing.T) {
+	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{
+		OpenAIProxyModeKey: OpenAIProxyModeRequest, OpenAIProxyIDsKey: []int64{11, 22},
+		OpenAIProxySessionAffinityKey: true,
+	}}
+	scope := func(t *testing.T, headers map[string]string, body, source string) any {
+		t.Helper()
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		for name, value := range headers {
+			c.Request.Header.Set(name, value)
+		}
+		c.Set("api_key", &APIKey{ID: 100})
+		collector := requesttiming.New(time.Now(), int64(len(body)))
+		ctx := requesttiming.With(c.Request.Context(), collector)
+		resolved := withOpenAIRequestProxySession(ctx, c, account, []byte(body))
+		collector.Finish(http.StatusOK, false)
+		collector.WhenFinished(func(snapshot requesttiming.Snapshot) {
+			require.Contains(t, snapshot.Events, "request_proxy_affinity_"+source)
+		})
+		return resolved.Value(openAIRequestProxySessionKey{})
+	}
+
+	explicit := scope(t, map[string]string{"thread-id": "thread-one"}, `{"input":"first turn"}`, "declared")
+	require.NotNil(t, explicit)
+	require.Equal(t, explicit, scope(t, map[string]string{openAIWSTurnMetadataHeader: `{"thread_id":"thread-one"}`},
+		`{"input":"continued turn"}`, "codex_thread"))
+	require.Equal(t, explicit, scope(t, nil,
+		`{"client_metadata":{"x-codex-turn-metadata":"{\"thread_id\":\"thread-one\"}"},"input":"compacted history"}`, "codex_thread"))
+	require.Equal(t, explicit, scope(t, map[string]string{openAIWSWindowIDHeader: "thread-one:1"},
+		`{"input":"another turn"}`, "codex_thread"))
+	require.NotEqual(t, explicit, scope(t, map[string]string{openAIWSTurnMetadataHeader: `{"thread_id":"thread-two"}`},
+		`{"input":"first turn"}`, "codex_thread"))
+
+	legacyThread := map[string]string{openAIWSTurnMetadataHeader: `{"thread_id":"thread-one"}`}
+	require.Equal(t, explicit, scope(t, legacyThread, `{"prompt_cache_key":"cache-hint","input":"first turn"}`, "codex_thread"))
+	require.Equal(t, explicit, scope(t, legacyThread, `{"prompt_cache_key":"other-hint","input":"follow up"}`, "codex_thread"))
+
+	hintBody := `{"prompt_cache_key":"cache-hint","input":"first turn"}`
+	hintScope := scope(t, nil, hintBody, "prompt_cache_key")
+	require.NotNil(t, hintScope)
+	require.Equal(t, hintScope, scope(t, map[string]string{
+		openCodeSessionAffinityHeader: "cache-hint", openAIWSTurnMetadataHeader: `{"thread_id":"thread-one"}`,
+	}, hintBody, "client_hint"))
+	require.Nil(t, scope(t, nil, `{"prompt_cache_key":{"not":"a string"}}`, "missing"))
+	require.Nil(t, scope(t, map[string]string{
+		"thread-id": "thread-one", openAIWSTurnMetadataHeader: `{"thread_id":"thread-one"}`,
+	}, `{"client_metadata":{"thread_id":"thread-two"},"input":"first turn"}`, "invalid"))
 }

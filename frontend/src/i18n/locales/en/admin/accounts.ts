@@ -884,6 +884,8 @@ export default {
     proxyRequestRisk: 'Using multiple IPs for one account may increase verification challenges, rate limits or account restrictions. Throughput is not guaranteed. Keep total concurrency controlled; switch back to a single proxy or disable the account when needed.',
     proxyGroup: 'Account proxy group (from IP management)',
     proxyRequestHint: 'For ordinary OpenAI OAuth and BPS. Use only selected proxies, preferring the exit with the fewest in-flight account requests, including within one session. The account concurrency limit is unchanged; unavailable proxies never fall back to a direct connection. Authorization and maintenance use the first usable selected proxy.',
+    proxySessionAffinity: 'Pin session exit in multi-proxy mode',
+    proxySessionAffinityHint: 'Applies only to multiple proxies (distribute by request). With a stable client session or thread ID, all requests in that session keep using one proxy from the group. Single-proxy mode already uses its selected exit and does not need this option. This does not control account selection, enable WebSockets, or guarantee cache hits.',
     proxyRequired: 'Select at least one proxy for request distribution',
     proxyNoUsable: 'The proxy catalog is not ready or no selected proxy is usable. Retry or update the selection; a direct connection will not be used.',
     proxyAuthorizationChanged: 'The authorization proxy or proxy mode has changed or become unavailable. Generate a new authorization URL before continuing.',

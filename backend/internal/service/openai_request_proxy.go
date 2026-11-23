@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sync"
 
 	"github.com/Wei-Shaw/sub2api/internal/mihomo"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requesttiming"
 	"github.com/gin-gonic/gin"
 )
 
@@ -17,6 +19,7 @@ var errOpenAIRequestProxyUnavailable = errors.New("selected OpenAI request proxi
 
 type openAIRequestProxyContextKey struct{}
 type openAIRequestProxySessionKey struct{}
+type openAIRequestProxyWeakAffinityKey struct{}
 
 const openAIRequestProxyOpsKey = "openai_request_proxy_ops_route"
 
@@ -152,8 +155,8 @@ func (a *Account) requestProxySessionAffinityEnabled() bool {
 	return a.OpenAIRequestProxySessionAffinityEnabled()
 }
 
-// Capture the declared identity before request transformations. When clients omit
-// one, reuse the stable-prefix seed already used by account scheduling.
+// Read affinity signals before request transformations. Account scheduling
+// also recognizes legacy Codex threads and stable input prefixes.
 func withOpenAIRequestProxySession(ctx context.Context, c *gin.Context, account *Account, body []byte) context.Context {
 	if !account.requestProxySessionAffinityEnabled() {
 		return ctx
@@ -163,23 +166,51 @@ func withOpenAIRequestProxySession(ctx context.Context, c *gin.Context, account 
 		return ctx
 	}
 	identity := resolveOpenAIClientSessionIdentity(c, body)
-	var value string
+	var value, source string
 	switch identity.metadata.Status {
 	case OpenAIClientSessionIdentityResolved:
-		value = identity.identity.value
+		value, source = identity.identity.value, "declared"
 	case OpenAIClientSessionIdentityMissing:
-		value = sanitizeSessionID(explicitOpenAISessionID(c, body))
-		if value == "" {
-			if seed := deriveOpenAIAnchoredContentSessionSeed(body); seed != "" {
-				value = "content:" + seed
-			}
+		// A caller-supplied routing header retains precedence. A legacy thread
+		// is more specific than the cache key, which the caller can override.
+		if hint := sanitizeSessionID(explicitOpenAIHeaderSessionID(c)); hint != "" {
+			value, source = hint, "client_hint"
+		} else if thread := sanitizeSessionID(resolveOpenAIWSClientThreadID(c, body)); thread != "" {
+			value, source = thread, "codex_thread"
+		} else if hint := sanitizeSessionID(openAIRequestPromptCacheKey(body)); hint != "" {
+			value, source = hint, "prompt_cache_key"
+		} else if seed := deriveOpenAIAnchoredContentSessionSeed(body); seed != "" {
+			value, source = "content:"+seed, "content_prefix"
+		} else {
+			source = "missing"
 		}
+	default:
+		source = "invalid"
 	}
+	requesttiming.Mark(ctx, "request_proxy_affinity_"+source)
 	if value == "" {
 		return ctx
 	}
 	scope := fmt.Sprintf("%d:%x", apiKeyID, sha256.Sum256([]byte(value)))
+	if source == "content_prefix" || source == "prompt_cache_key" {
+		ctx = context.WithValue(ctx, openAIRequestProxyWeakAffinityKey{}, true)
+	}
 	return context.WithValue(ctx, openAIRequestProxySessionKey{}, scope)
+}
+
+func openAIRequestProxyWSScope(ctx context.Context, account *Account) string {
+	if ctx == nil || !account.OpenAIRequestProxySessionAffinityEnabled() || ctx.Value(openAIRequestProxyWeakAffinityKey{}) == true {
+		return ""
+	}
+	route, ok := openAIRequestProxyFromContext(ctx, account.ID)
+	if !ok || route.lease == nil || !route.lease.SessionBound {
+		return ""
+	}
+	scope, _ := ctx.Value(openAIRequestProxySessionKey{}).(string)
+	if scope == "" {
+		return ""
+	}
+	return fmt.Sprintf("request-proxy:%d:%d:%x:%s", account.ID, route.lease.ProxyID, sha256.Sum256([]byte(route.proxy)), scope)
 }
 
 func writeOpenAIRequestProxyError(c *gin.Context, code, message string) error {
@@ -192,6 +223,19 @@ func writeOpenAIRequestProxyError(c *gin.Context, code, message string) error {
 func openAIRequestProxyFromContext(ctx context.Context, accountID int64) (*openAIRequestProxyRoute, bool) {
 	route, _ := ctx.Value(openAIRequestProxyContextKey{}).(*openAIRequestProxyRoute)
 	return route, route != nil && route.accountID == accountID && route.proxy != ""
+}
+
+func validateOpenAIWSRequestProxy(ctx context.Context, account *Account, proxyURL string) error {
+	route, _ := openAIRequestProxyFromContext(ctx, account.ID)
+	if !account.OpenAIRequestProxyEnabled() && route == nil {
+		return nil
+	}
+	if openAIRequestProxyWSScope(ctx, account) == "" || !slices.Contains(account.OpenAIRequestProxyIDs(), route.lease.ProxyID) ||
+		!route.lease.RequestProxyCurrent() {
+		return errOpenAIRequestProxyUnavailable
+	}
+	_, err := ValidateOpenAIRequestProxyEgress(ctx, account.ID, proxyURL)
+	return err
 }
 
 // ValidateOpenAIRequestProxyEgress lets transport adapters preserve a lease

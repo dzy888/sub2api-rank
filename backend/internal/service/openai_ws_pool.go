@@ -73,10 +73,11 @@ type openAIWSAcquireRequest struct {
 	timezoneBinding *requestTimezoneBinding
 	timezoneMode    string
 	// Private experiment connections must never serve a different client scope.
-	AnchorScope string
-	Account     *Account
-	WSURL       string
-	Headers     http.Header
+	AnchorScope       string
+	RequestProxyScope string
+	Account           *Account
+	WSURL             string
+	Headers           http.Header
 	// HeadersFactory is evaluated inside dialConn. It exists so credentials
 	// whose authorization is per-dial (Agent Identity) are never cached in
 	// lastAcquire or delayed prewarm state.
@@ -107,6 +108,8 @@ type openAIWSHandshakeCompatibilityKey struct {
 	clientRequestID      string
 	codexWindowID        string
 	proxyURL             string
+	requestProxyScope    string
+	requestProxySession  [3]string
 }
 
 type openAIWSConnLease struct {
@@ -1597,7 +1600,12 @@ func (p *openAIWSConnPool) recordLastSuccessfulAcquire(accountID int64, generati
 		ap.mu.Unlock()
 		return
 	}
-	ap.lastAcquire = cloneOpenAIWSAcquireRequestPtr(&req)
+	// Prewarming runs outside the caller's proxy lease.
+	if req.RequestProxyScope != "" {
+		ap.lastAcquire = nil
+	} else {
+		ap.lastAcquire = cloneOpenAIWSAcquireRequestPtr(&req)
+	}
 	ap.mu.Unlock()
 }
 
@@ -2179,6 +2187,11 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			return nil, err
 		}
 	}
+	if req.RequestProxyScope != "" {
+		if err := validateOpenAIWSRequestProxy(ctx, req.Account, req.ProxyURL); err != nil {
+			return nil, err
+		}
+	}
 	if req.Account != nil {
 		ctx = upstreamroute.WithAccountID(ctx, req.Account.ID)
 	}
@@ -2394,6 +2407,12 @@ func openAIWSAcquireCompatibility(req openAIWSAcquireRequest) openAIWSHandshakeC
 	key.proxyURL = stringsTrim(req.ProxyURL)
 	key.anchorScope = req.AnchorScope
 	key.timezoneMode = req.timezoneMode
+	key.requestProxyScope = req.RequestProxyScope
+	if req.RequestProxyScope != "" {
+		key.requestProxySession = [3]string{
+			req.Headers.Get("session_id"), req.Headers.Get("session-id"), req.Headers.Get("conversation_id"),
+		}
+	}
 	return key
 }
 

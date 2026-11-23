@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/mihomo"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -97,16 +98,61 @@ func TestOpenAIWSSSEAccelerationRouting(t *testing.T) {
 	}
 }
 
-type wsSSETestDialer struct {
-	conn   openAIWSClientConn
-	status int
-	err    error
-	calls  atomic.Int32
+func TestOpenAIWSSSEAccelerationKeepsOnlyStickyRequestProxyRoutesOnWS(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
+	account, cfg := wsSSETestAccount(), newOpenAIWSV2TestConfig()
+	account.Extra[OpenAIProxyModeKey] = OpenAIProxyModeRequest
+	account.Extra[OpenAIProxyIDsKey] = []int64{11, 22}
+	account.Extra[OpenAIProxySessionAffinityKey] = true
+	decision := (&OpenAIGatewayService{cfg: cfg}).resolveOpenAIHTTPWSSSEDecision(
+		c, account, []byte(wsSSETestRequest), NewOpenAIWSProtocolResolver(cfg).Resolve(account),
+	)
+	require.Equal(t, openAIOAuthWSSSEAccelerationReason, decision.Reason)
+	require.Equal(t, OpenAIUpstreamTransportHTTPSSE,
+		resolveOpenAIRequestProxyWSDecision(context.Background(), account, decision).Transport,
+		"a session-affine lease is required before an HTTP client may use the WS pool")
+
+	ctx := context.WithValue(context.Background(), openAIRequestProxySessionKey{}, "api-key:thread")
+	route := &openAIRequestProxyRoute{accountID: account.ID, proxy: "socks5://proxy.example:1080", lease: &mihomo.BPSLease{ProxyID: 11}}
+	ctx = context.WithValue(ctx, openAIRequestProxyContextKey{}, route)
+	require.Equal(t, OpenAIUpstreamTransportHTTPSSE,
+		resolveOpenAIRequestProxyWSDecision(ctx, account, decision).Transport)
+	route.lease.SessionBound = true
+	routed := resolveOpenAIRequestProxyWSDecision(ctx, account, decision)
+	require.Equal(t, OpenAIUpstreamTransportResponsesWebsocketV2, routed.Transport)
+	require.Equal(t, openAIOAuthWSSSEAccelerationReason, routed.Reason)
+	contentCtx := context.WithValue(ctx, openAIRequestProxyWeakAffinityKey{}, true)
+	require.Equal(t, OpenAIUpstreamTransportHTTPSSE,
+		resolveOpenAIRequestProxyWSDecision(contentCtx, account, decision).Transport)
+
+	account.Extra[OpenAIProxySessionAffinityKey] = false
+	require.Equal(t, OpenAIUpstreamTransportHTTPSSE,
+		resolveOpenAIRequestProxyWSDecision(ctx, account, decision).Transport)
 }
 
-func (d *wsSSETestDialer) Dial(context.Context, string, http.Header, string) (openAIWSClientConn, int, http.Header, error) {
+type wsSSETestDialer struct {
+	conn        openAIWSClientConn
+	connFactory func() openAIWSClientConn
+	status      int
+	err         error
+	calls       atomic.Int32
+	mu          sync.Mutex
+	proxyURLs   []string
+}
+
+func (d *wsSSETestDialer) Dial(_ context.Context, _ string, _ http.Header, proxyURL string) (openAIWSClientConn, int, http.Header, error) {
 	d.calls.Add(1)
-	return d.conn, d.status, http.Header{}, d.err
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.proxyURLs = append(d.proxyURLs, proxyURL)
+	conn := d.conn
+	if d.connFactory != nil {
+		conn = d.connFactory()
+	}
+	return conn, d.status, http.Header{}, d.err
 }
 
 func wsSSETestService(t *testing.T, d *wsSSETestDialer, upstream HTTPUpstream) *OpenAIGatewayService {

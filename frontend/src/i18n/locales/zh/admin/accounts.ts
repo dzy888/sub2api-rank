@@ -1006,6 +1006,8 @@ export default {
     proxyRequestRisk: '同账号使用多个 IP 可能增加异常验证、限流或账号限制风险，不保证提升吞吐。建议控制总并发；需要恢复单出口时切回单代理，或停用账号。',
     proxyGroup: '账号代理组（从 IP 管理选择）',
     proxyRequestHint: '适用于普通 OpenAI OAuth 和 BPS。仅使用所选代理，优先分配当前账号在途请求最少的出口，同会话可分散；账号总并发上限不变，不可用时不会直连。授权与维护使用组内首个有效代理。',
+    proxySessionAffinity: '多代理模式下固定会话出口',
+    proxySessionAffinityHint: '仅“多代理（按请求分散）”模式生效。开启后，网关按客户端稳定的 session 或 thread 标识，让同一会话持续使用代理组中的同一个出口。单代理本来就固定使用所选出口，无需开启。此项不控制账号选择，也不会单独开启 WebSocket 或保证缓存命中。',
     proxyRequired: '按请求分散模式至少需要选择一个代理',
     proxyNoUsable: '代理目录尚未就绪或所选代理均不可用，请重试或调整选择；不会回退直连。',
     proxyAuthorizationChanged: '授权时的代理或代理模式已变更、失效，请重新生成授权链接后再完成授权。',

@@ -632,9 +632,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return admissionErr
 	}
 	account = latest
-	if account.OpenAIRequestProxyEnabled() {
-		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "Request proxy routing requires HTTP/SSE; WebSocket routing is unavailable", nil)
-	}
+	requestProxy := account.OpenAIRequestProxyEnabled()
 	if account.IsSIWCEnabled() {
 		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "SIWC accounts require HTTP/SSE", nil)
 	}
@@ -747,6 +745,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		switch ingressMode {
 		case OpenAIWSIngressModePassthrough:
+			if requestProxy {
+				return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "Request proxy routing requires WebSocket context pool mode", nil)
+			}
 			if s.wsNodeOwnerEnabled() {
 				return wsNodeOwnerRejection()
 			}
@@ -1272,6 +1273,28 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 	legacyPayloadBridge := s.shouldBridgeOpenAIWSHTTP(account, firstPayload.payloadBytes, firstPayload.previousResponseID)
 	useHTTPBridge := forceHTTPBridge || legacyPayloadBridge
+	proxySessionScope := ""
+	if requestProxy {
+		if useHTTPBridge || !account.OpenAIRequestProxySessionAffinityEnabled() {
+			return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "Request proxy routing requires WebSocket context pool mode and session affinity", nil)
+		}
+		ctx = withOpenAIRequestProxySession(ctx, c, account, firstClientMessage)
+		proxyCtx, releaseProxy, proxyErr := s.beginOpenAIRequestProxy(ctx, nil, account)
+		if proxyErr != nil {
+			return NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "No selected proxy is ready", proxyErr)
+		}
+		defer releaseProxy()
+		ctx = proxyCtx
+		proxySessionScope = openAIRequestProxyWSScope(ctx, account)
+		if proxySessionScope == "" {
+			return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "Request proxy WebSocket requires a stable client session binding", nil)
+		}
+		proxySessionScope += ":ingress:" + resolveOpenAIWSExecutionLane(c, firstClientMessage)
+		if route, ok := openAIRequestProxyFromContext(ctx, account.ID); ok {
+			c.Set(openAIRequestProxyOpsKey, route)
+			defer c.Set(openAIRequestProxyOpsKey, (*openAIRequestProxyRoute)(nil))
+		}
+	}
 	if smartSession != nil {
 		if legacyPayloadBridge {
 			smartSession.Decision.Protocol, smartSession.Decision.Candidate, smartSession.Decision.Reason = "http", "http", "legacy_bridge"
@@ -1301,6 +1324,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		sessionHash = s.GenerateSessionHash(c, payload.rawForHash)
 		if scope, _ := resolveOpenAIWSExecutionScope(c, payload.rawForHash, apiKeyID); scope != "" {
 			sessionHash = scope
+		}
+		if proxySessionScope != "" {
+			sessionHash = proxySessionScope
 		}
 		preferredConnID = ""
 		storeDisabled = s.isOpenAIWSStoreDisabledInRequestRaw(payload.payloadRaw, account)
@@ -1695,9 +1721,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return fmt.Errorf("build ws headers: %w", buildHdrErr)
 	}
 	baseAcquireReq := openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   wsURL,
-		Headers: wsHeaders,
+		RequestProxyScope: proxySessionScope,
+		Account:           account,
+		WSURL:             wsURL,
+		Headers:           wsHeaders,
 		HeadersFactory: func(factoryCtx context.Context, headers http.Header) (http.Header, error) {
 			latest, err := s.admitOpenAITurnForGroup(factoryCtx, groupID, enforceGroup, account, firstRoutingFields[0].String(), firstPayload.payloadRaw)
 			if err != nil {
@@ -1721,6 +1748,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					err,
 				)
 				return nil, err
+			}
+			if proxySessionScope != "" && s.codexTicketPinsEgressFromHeader(factoryCtx, headers, latest) {
+				return nil, errOpenAIRequestProxyUnavailable
 			}
 			return s.refreshOpenAIAgentIdentityHeaders(factoryCtx, account, headers)
 		},
@@ -1935,6 +1965,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return nil, errors.New("upstream websocket lease is nil")
 		}
 		latest, admissionErr := s.admitOpenAITurn(ctx, c, account, extractOpenAICodexTicketModel(payload), payload)
+		if admissionErr == nil && requestProxy {
+			admissionErr = validateOpenAIWSRequestProxy(ctx, latest, lease.conn.handshakeCompatibility.proxyURL)
+		}
 		if admissionErr == nil {
 			admissionErr = s.checkOpenAIWSBinding(latest, extractOpenAICodexTicketModel(payload), lease.conn.turnBinding)
 		}
@@ -2551,7 +2584,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return true
 	}
 	retryIngressTurn := func(relayErr error, turn int, connID string) bool {
-		if !OpenAIWSAgentRecoveryCanRetry(ctx) {
+		if requestProxy || !OpenAIWSAgentRecoveryCanRetry(ctx) {
 			return false
 		}
 		if s.wsNodeOwnerEnabled() && storeDisabled {
@@ -2844,6 +2877,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			forcePreferredConn = true
 		}
 		if sessionLease == nil {
+			if requestProxy && storeDisabled && currentPreviousResponseID != "" {
+				forcePreferredConn = true
+			}
 			acquiredLease, acquireErr := acquireTurnLease(turn, preferredConnID, forcePreferredConn, turnRetry > 0)
 			if acquireErr != nil {
 				if ownerProtected && currentPreviousResponseID != "" {

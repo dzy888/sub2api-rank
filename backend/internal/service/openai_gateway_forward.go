@@ -341,9 +341,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
 	// HTTP SSE may opt into the native WS pool on ordinary OAuth accounts.
 	wsDecision = s.resolveOpenAIHTTPWSSSEDecision(c, account, body, wsDecision)
-	if account.OpenAIRequestProxyEnabled() {
-		wsDecision = openAIWSHTTPDecision("request_proxy_requires_http")
-	}
+	wsDecision = resolveOpenAIRequestProxyWSDecision(ctx, account, wsDecision)
 	if openAIAgentRecoveryBound(ctx) {
 		// The observation was made at an actual HTTP send. Preserve that wire
 		// instead of letting a later WS preference change its continuation.
