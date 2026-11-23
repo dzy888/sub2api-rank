@@ -3468,7 +3468,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	wsAttemptMessage := append([]byte(nil), firstMessage...)
 	initialDispatchStarted := false
+	wsSameAccountRetryExpired := false
 	waitForWSSameAccountRetry := func(account *service.Account, failoverErr *service.UpstreamFailoverError) bool {
+		wsSameAccountRetryExpired = false
 		if !service.OpenAIWSAgentRecoveryCanRetry(ctx) {
 			return false
 		}
@@ -3496,7 +3498,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		case <-ctx.Done():
 			return false
 		case <-time.After(retryDelay):
-			return service.OpenAISameAccountRetryAdmissible(ctx, account.ID) && service.OpenAIWSIngressCanFailover(ctx, c)
+			admissible := service.OpenAISameAccountRetryAdmissible(ctx, account.ID)
+			wsSameAccountRetryExpired = !admissible
+			return admissible && service.OpenAIWSIngressCanFailover(ctx, c)
 		}
 	}
 	handleWSFailover := func(account *service.Account, failoverErr *service.UpstreamFailoverError) bool {
@@ -4416,6 +4420,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 						return
 					}
 					continue
+				}
+				if wsSameAccountRetryExpired {
+					// This retry was admitted before D and expired during backoff.
+					// Switching accounts would discard its deadline and send after D.
+					releaseTurnSlots()
+					closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
+					return
 				}
 				if handleWSFailover(account, failoverErr) {
 					break
