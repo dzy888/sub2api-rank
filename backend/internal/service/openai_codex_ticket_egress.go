@@ -326,18 +326,6 @@ func (s *OpenAIGatewayService) pinCodexTicketEgress(req *http.Request, account *
 
 func (s *OpenAIGatewayService) pinCodexTicketWSAcquire(ctx context.Context, headers http.Header, account *Account) (string, func(), error) {
 	s.restoreBoundCodexTicketHarvestIdentity(ctx, headers, account)
-	if account == nil {
-		return s.pinCodexTicketEgressFromHeader(ctx, headers, account, "")
-	}
-	if route, _ := openAIRequestProxyFromContext(ctx, account.ID); route != nil || account.OpenAIRequestProxyEnabled() {
-		if route == nil || s.codexTicketPinsEgressFromHeader(ctx, headers, account) {
-			return "", nil, errOpenAIRequestProxyUnavailable
-		}
-		if err := validateOpenAIWSRequestProxy(ctx, account, route.proxy); err != nil {
-			return "", nil, err
-		}
-		return route.proxy, func() {}, nil
-	}
 	return s.pinCodexTicketEgressFromHeader(ctx, headers, account, openAIAccountProxyURL(account))
 }
 

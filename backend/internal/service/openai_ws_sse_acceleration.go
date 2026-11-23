@@ -46,24 +46,6 @@ func (s *OpenAIGatewayService) resolveOpenAIHTTPWSSSEDecision(
 	return resolveOpenAIWSDecisionByClientTransport(decision, clientTransport)
 }
 
-// Request-proxy WS must inherit a session-bound exit. Without an explicit or
-// stable fallback identity, use HTTP so independently allocated requests do
-// not accidentally share a pooled WebSocket route.
-func resolveOpenAIRequestProxyWSDecision(
-	ctx context.Context,
-	account *Account,
-	decision OpenAIWSProtocolDecision,
-) OpenAIWSProtocolDecision {
-	if account == nil || !account.OpenAIRequestProxyEnabled() {
-		return decision
-	}
-	if decision.Transport == OpenAIUpstreamTransportResponsesWebsocketV2 &&
-		decision.Reason == openAIOAuthWSSSEAccelerationReason && openAIRequestProxyWSScope(ctx, account) != "" {
-		return decision
-	}
-	return openAIWSHTTPDecision("request_proxy_requires_http")
-}
-
 // A failed handshake precedes response.create and can safely fall back to HTTP.
 // A missing first event after writing the request is NOT proof it was unsent.
 func canFallbackOpenAIWSSSEHandshake(ctx context.Context, c *gin.Context, err error) bool {

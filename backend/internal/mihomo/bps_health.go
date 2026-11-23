@@ -51,15 +51,14 @@ type bpsNodeHealth struct {
 // even if a later request has rebound the same session.
 type BPSLease struct {
 	// Durable identity of a selected managed proxy; never contains its URL credentials.
-	ProxyID      int64
-	ProxyName    string
-	ProxyURL     string
-	SessionBound bool
-	manager      *Manager
-	node         string
-	generation   uint64
-	release      func()
-	failureOnce  sync.Once
+	ProxyID     int64
+	ProxyName   string
+	ProxyURL    string
+	manager     *Manager
+	node        string
+	generation  uint64
+	release     func()
+	failureOnce sync.Once
 }
 
 func (l *BPSLease) Release() { l.release() }

@@ -76,13 +76,6 @@ func (a *Account) OpenAIRequestProxyIDs() []int64 {
 }
 
 func (s *adminServiceImpl) validateOpenAIProxySettingsChange(ctx context.Context, previous, account *Account) error {
-	rawMode, supplied := account.Extra[OpenAIProxyModeKey]
-	if supplied && rawMode != OpenAIProxyModeSingle && rawMode != OpenAIProxyModeRequest {
-		return infraerrors.BadRequest("INVALID_OPENAI_PROXY_MODE", "OpenAI proxy mode must be single or request")
-	}
-	if supplied && rawMode == OpenAIProxyModeSingle {
-		delete(account.Extra, OpenAIProxySessionAffinityKey)
-	}
 	if raw, exists := account.Extra[OpenAIProxySessionAffinityKey]; exists {
 		enabled, ok := raw.(bool)
 		if !ok {
@@ -92,6 +85,10 @@ func (s *adminServiceImpl) validateOpenAIProxySettingsChange(ctx context.Context
 			account.OpenAIProxyMode() != OpenAIProxyModeRequest || len(account.OpenAIRequestProxyIDs()) == 0) {
 			return infraerrors.BadRequest("OPENAI_PROXY_SESSION_AFFINITY_REQUIRES_GROUP", "session affinity requires an OpenAI OAuth request proxy group")
 		}
+	}
+	rawMode, supplied := account.Extra[OpenAIProxyModeKey]
+	if supplied && rawMode != OpenAIProxyModeSingle && rawMode != OpenAIProxyModeRequest {
+		return infraerrors.BadRequest("INVALID_OPENAI_PROXY_MODE", "OpenAI proxy mode must be single or request")
 	}
 	ids, valid := parseExcelBPSProxyIDs(account.Extra[OpenAIProxyIDsKey])
 	if !valid {

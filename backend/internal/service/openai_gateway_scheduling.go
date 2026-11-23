@@ -63,15 +63,16 @@ func (s *OpenAIGatewayService) ExtractSessionID(c *gin.Context, body []byte) str
 	return explicitOpenAIRequestSessionID(c, body)
 }
 
-func openAIRequestPromptCacheKey(body []byte) string {
-	if !bytes.Contains(body, []byte("prompt_cache_key")) && !bytes.Contains(body, []byte(`\u`)) {
+func explicitOpenAISessionID(c *gin.Context, body []byte) string {
+	if c == nil {
 		return ""
 	}
-	value := openAIRequestPayloadView(body).Get("prompt_cache_key")
-	if value.Type != gjson.String {
-		return ""
+
+	sessionID := explicitOpenAIHeaderSessionID(c)
+	if sessionID == "" && len(body) > 0 {
+		sessionID = strings.TrimSpace(openAIRequestPayloadView(body).Get("prompt_cache_key").String())
 	}
-	return strings.TrimSpace(value.Str)
+	return sessionID
 }
 
 // openAIRequestPayloadView unwraps Responses WebSocket event envelopes while

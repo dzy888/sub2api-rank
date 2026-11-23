@@ -81,9 +81,6 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	if proxyID := opsUpstreamProxyID(account); proxyID != nil {
 		timingProxyID = *proxyID
 	}
-	if route, ok := openAIRequestProxyFromContext(ctx, account.ID); ok && route.lease != nil {
-		timingProxyID = route.lease.ProxyID
-	}
 	ctx, responseTrace := requesttiming.StartResponseAttempt(ctx, account.ID, timingProxyID, route)
 	responseTerminal := ""
 	defer func() { responseTrace.FinishResponseAttempt(resultErr, responseTerminal) }()
@@ -180,11 +177,6 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	// 作用域由 Forward 从改写前的原始请求算出后传入，reqBody 此时已带账号 namespace。
 	if executionScope = strings.TrimSpace(executionScope); executionScope != "" {
 		sessionHash = executionScope
-	}
-	proxySessionScope := openAIRequestProxyWSScope(ctx, account)
-	if proxySessionScope != "" {
-		proxySessionScope += ":sse:" + executionScope
-		sessionHash = proxySessionScope
 	}
 	if turnState == "" && stateStore != nil && sessionHash != "" {
 		if savedTurnState, ok := stateStore.GetSessionTurnState(groupID, sessionHash); ok {
@@ -305,11 +297,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		anchorScope = anchor.scope
 	}
 	lease, err := s.getOpenAIWSConnPool().Acquire(acquireCtx, openAIWSAcquireRequest{
-		AnchorScope:       anchorScope,
-		RequestProxyScope: proxySessionScope,
-		Account:           account,
-		WSURL:             wsURL,
-		Headers:           wsHeaders,
+		AnchorScope: anchorScope,
+		Account:     account,
+		WSURL:       wsURL,
+		Headers:     wsHeaders,
 		HeadersFactory: func(factoryCtx context.Context, headers http.Header) (http.Header, error) {
 			latest, err := s.admitOpenAITurnForGroup(factoryCtx, groupID, enforceGroup, account, mappedModel)
 			if err != nil {
@@ -333,9 +324,6 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 					err,
 				)
 				return nil, err
-			}
-			if proxySessionScope != "" && s.codexTicketPinsEgressFromHeader(factoryCtx, headers, latest) {
-				return nil, errOpenAIRequestProxyUnavailable
 			}
 			if anchor != nil && anchor.cookie != "" {
 				replaceCodexWSAnchorCookie(headers, anchor.cookie)
@@ -495,9 +483,6 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 
 	checkBeforeWrite := func() error {
 		latest, err := s.admitOpenAITurn(ctx, c, account, mappedModel, payloadAsJSONBytes(payload))
-		if err == nil {
-			err = validateOpenAIWSRequestProxy(ctx, latest, proxyURL)
-		}
 		if err == nil {
 			err = s.checkOpenAIWSBinding(latest, mappedModel, lease.conn.turnBinding)
 		}

@@ -5,20 +5,15 @@ package service
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
-	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -178,265 +173,41 @@ func TestOpenAIRequestProxyForwardSameSessionDistributesSixThroughThree(t *testi
 
 func TestOpenAIRequestProxyForwardSessionAffinityPinsAuthenticatedResponses(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	observed := make(chan int64, 1)
 	svc, account := localBPSRequestProxyFixture(t, 3, func(id int, w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
-		select {
-		case observed <- int64(id):
-		default:
-			t.Error("response was forwarded more than once")
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, bpsRequestCompletedWire)
+		t.Errorf("selector-only fixture unexpectedly sent a business request to proxy %d", id)
 	})
 	account.Extra["openai_excel_bps"] = false
 	account.Extra["openai_proxy_mode"] = "request"
 	account.Extra["openai_proxy_ids"] = []int64{1, 2, 3}
 	account.Extra[OpenAIProxySessionAffinityKey] = true
 
-	forward := func(apiKeyID int64, threadID, input, cacheHint string, legacy bool) int64 {
-		t.Helper()
-		body := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":%q,"stream":true,"prompt_cache_key":%q}`, input, cacheHint))
-		rec := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(rec)
+	acquire := func(apiKeyID int64, threadID, input string) int64 {
+		body := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":%q,"stream":true,"prompt_cache_key":"moving-hint"}`, input))
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
-		if legacy {
-			c.Request.Header.Set(openAIWSTurnMetadataHeader, fmt.Sprintf(`{"thread_id":%q}`, threadID))
-		} else {
-			c.Request.Header.Set("thread-id", threadID)
-		}
+		c.Request.Header.Set("thread-id", threadID)
 		c.Set("api_key", &APIKey{ID: apiKeyID})
-		requestAccount := *account
-		requestAccount.Extra = cloneExcelBPSRecoveryExtra(account.Extra)
-		requestAccount.Credentials = cloneExcelBPSRecoveryExtra(account.Credentials)
-		result, err := svc.Forward(t.Context(), c, &requestAccount, body)
+		ctx := withOpenAIRequestProxySession(c.Request.Context(), c, account, body)
+		require.NotEmpty(t, ctx.Value(openAIRequestProxySessionKey{}))
+		routed, release, err := svc.beginOpenAIRequestProxy(ctx, c, account)
 		require.NoError(t, err)
-		require.NotNil(t, result)
-		require.Equal(t, http.StatusOK, rec.Code)
-		require.Contains(t, rec.Body.String(), "response.completed")
-		select {
-		case id := <-observed:
-			return id
-		default:
-			t.Fatal("response did not pass through a selected proxy")
-			return 0
-		}
+		route, ok := openAIRequestProxyFromContext(routed, account.ID)
+		require.True(t, ok)
+		id := route.lease.ProxyID
+		release()
+		return id
 	}
 
-	first := forward(100, "thread-a", "first turn", "initial-hint", false)
-	second := forward(100, "thread-a", "compacted continuation", "changing-hint", true)
-	otherSession := forward(100, "thread-b", "independent session", "changing-hint", true)
-	otherKey := forward(101, "thread-a", "same thread, another key", "changing-hint", true)
-	nextTurn := forward(100, "thread-a", "another continuation", "third-hint", true)
+	first := acquire(100, "thread-a", "first turn")
+	second := acquire(100, "thread-a", "compacted continuation")
+	otherSession := acquire(100, "thread-b", "independent session")
+	otherKey := acquire(101, "thread-a", "same thread, another key")
+	nextTurn := acquire(100, "thread-a", "another continuation")
 	require.Equal(t, first, second)
 	require.NotEqual(t, first, otherSession, "new sessions should spread over available exits")
 	require.NotEqual(t, otherSession, otherKey, "API keys must not share a session binding")
 	require.NotEqual(t, first, otherKey, "another API key must receive an independent binding")
 	require.Equal(t, first, nextTurn)
-}
-
-func TestOpenAIRequestProxyNativeWebSocketPinsOneExitForItsSession(t *testing.T) {
-	svc, account := localBPSRequestProxyFixture(t, 3, func(int, http.ResponseWriter, *http.Request) {
-		t.Error("native WebSocket unexpectedly forwarded an HTTP request")
-	})
-	account.Extra["openai_excel_bps"] = false
-	account.Extra[OpenAIProxyModeKey] = OpenAIProxyModeRequest
-	account.Extra[OpenAIProxyIDsKey] = []int64{1, 2, 3}
-	account.Extra[OpenAIProxySessionAffinityKey] = true
-	account.Extra["openai_passthrough"] = false
-	account.Extra["openai_oauth_responses_websockets_v2_enabled"] = true
-	upstream := &openAIWSCaptureConn{events: [][]byte{
-		[]byte(`{"type":"response.completed","response":{"id":"resp_first","model":"gpt-5.4","usage":{"input_tokens":100,"output_tokens":2}}}`),
-		[]byte(`{"type":"response.completed","response":{"id":"resp_second","model":"gpt-5.4","usage":{"input_tokens":104,"input_tokens_details":{"cached_tokens":100},"output_tokens":2}}}`),
-	}}
-	dialer := &wsSSETestDialer{conn: upstream}
-	cfg := newOpenAIWSV2TestConfig()
-	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 3
-	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 3
-	svc.cfg = cfg
-	svc.cache = &stubGatewayCache{}
-	svc.toolCorrector = NewCodexToolCorrector()
-	svc.openaiWSResolver = NewOpenAIWSProtocolResolver(cfg)
-	svc.openaiWSPool = newOpenAIWSConnPool(cfg)
-	svc.openaiWSPool.setClientDialerForTest(dialer)
-	t.Cleanup(svc.openaiWSPool.Close)
-
-	expectedRoute := &Proxy{Protocol: "http", Host: "unused.invalid", Port: 8080}
-	account.ProxyID, account.Proxy = new(int64(90)), expectedRoute
-	done := make(chan error, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := coderws.Accept(w, r, nil)
-		if err != nil {
-			done <- err
-			return
-		}
-		defer conn.CloseNow()
-		_, first, err := conn.Read(r.Context())
-		if err != nil {
-			done <- err
-			return
-		}
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request = r
-		c.Set("api_key", &APIKey{ID: 100})
-		done <- svc.ProxyResponsesWebSocketFromClient(r.Context(), c, conn, account, "test-token", first, nil)
-	}))
-	defer server.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
-	defer cancel()
-	client, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), &coderws.DialOptions{
-		HTTPHeader: http.Header{"Thread-Id": {"thread-one"}},
-	})
-	require.NoError(t, err)
-	defer client.CloseNow()
-	require.NoError(t, client.Write(ctx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.4","input":"first"}`)))
-	_, first, err := client.Read(ctx)
-	require.NoError(t, err)
-	require.Contains(t, string(first), "resp_first")
-	require.NoError(t, client.Write(ctx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.4","previous_response_id":"resp_first","input":"next"}`)))
-	_, second, err := client.Read(ctx)
-	require.NoError(t, err)
-	require.Contains(t, string(second), "resp_second")
-	require.Contains(t, string(second), `"cached_tokens":100`)
-	require.NoError(t, client.CloseNow())
-	select {
-	case <-done:
-	case <-ctx.Done():
-		t.Fatal("WebSocket ingress did not release its connection")
-	}
-	dialer.mu.Lock()
-	require.Len(t, dialer.proxyURLs, 1)
-	require.NotEmpty(t, dialer.proxyURLs[0])
-	require.NotEqual(t, expectedRoute.URL(), dialer.proxyURLs[0])
-	dialer.mu.Unlock()
-	upstream.mu.Lock()
-	defer upstream.mu.Unlock()
-	require.Len(t, upstream.writes, 2)
-	require.Equal(t, "resp_first", upstream.writes[1]["previous_response_id"])
-}
-
-func TestOpenAIRequestProxyWSSSEReusesLeasePerSessionAndDistributesNewSessions(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	svc, account := localBPSRequestProxyFixture(t, 3, func(id int, w http.ResponseWriter, r *http.Request) {
-		t.Errorf("WebSocket routing unexpectedly sent HTTP through proxy %d", id)
-	})
-	account.Extra["openai_excel_bps"] = false
-	account.Extra[OpenAIProxyModeKey] = OpenAIProxyModeRequest
-	account.Extra[OpenAIProxyIDsKey] = []int64{1, 2, 3}
-	account.Extra[OpenAIProxySessionAffinityKey] = true
-	account.Extra["openai_passthrough"] = false
-	account.Extra["openai_oauth_responses_websockets_v2_enabled"] = true
-	account.Extra["openai_oauth_responses_websockets_v2_mode"] = OpenAIWSIngressModeCtxPool
-	account.Extra["openai_oauth_ws_sse_acceleration"] = true
-
-	cfg := newOpenAIWSV2TestConfig()
-	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 3
-	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 3
-	pool := newOpenAIWSConnPool(cfg)
-	t.Cleanup(pool.Close)
-	dialer := &wsSSETestDialer{}
-	var responseID atomic.Int32
-	var firstConn *openAIWSCaptureConn
-	dialer.connFactory = func() openAIWSClientConn {
-		responses := 1
-		if responseID.Add(1) == 1 {
-			responses = 2
-		}
-		events := make([][]byte, 0, responses*3)
-		for i := 0; i < responses; i++ {
-			id := fmt.Sprintf("resp_proxy_%d_%d", responseID.Load(), i)
-			events = append(events,
-				[]byte(fmt.Sprintf(`{"type":"response.created","response":{"id":%q,"model":"gpt-5.4"}}`, id)),
-				[]byte(`{"type":"response.output_text.delta","delta":"ok"}`),
-				[]byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"model":"gpt-5.4","usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":90},"output_tokens":2}}}`, id)),
-			)
-		}
-		conn := &openAIWSCaptureConn{events: events}
-		if responses == 2 {
-			firstConn = conn
-		}
-		return conn
-	}
-	pool.setClientDialerForTest(dialer)
-	svc.cfg = cfg
-	svc.openaiWSResolver = NewOpenAIWSProtocolResolver(cfg)
-	svc.openaiWSPool = pool
-	svc.cache = &stubGatewayCache{}
-	svc.toolCorrector = NewCodexToolCorrector()
-
-	forward := func(thread, cacheKey, input string) {
-		t.Helper()
-		body := []byte(fmt.Sprintf(`{"model":"gpt-5.1","stream":true,"prompt_cache_key":%q,"input":[{"role":"user","content":"stable prefix"}, {"role":"user","content":%q}]}`, cacheKey, input))
-		rec := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(rec)
-		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
-		c.Request.Header.Set("thread-id", thread)
-		SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
-		c.Set("api_key", &APIKey{ID: 100})
-		result, err := svc.Forward(t.Context(), c, account, body)
-		require.NoError(t, err)
-		require.NotNil(t, result)
-		require.True(t, result.OpenAIWSMode)
-		require.Equal(t, 90, result.Usage.CacheReadInputTokens)
-		require.Contains(t, rec.Body.String(), "response.completed")
-		require.Equal(t, "oauth_http_sse_acceleration", c.GetString("openai_ws_transport_reason"))
-	}
-
-	forward("thread-a", "stable-cache-key", "first turn")
-	forward("thread-a", "stable-cache-key", "continued turn")
-	require.EqualValues(t, 1, dialer.calls.Load(), "same session should reuse its WS connection and leased exit")
-	dialer.mu.Lock()
-	firstExit := dialer.proxyURLs[0]
-	dialer.mu.Unlock()
-	require.NotEmpty(t, firstExit)
-
-	forward("thread-b", "another-cache-key", "independent conversation")
-	require.EqualValues(t, 2, dialer.calls.Load(), "a new session may establish a connection on another selected exit")
-	dialer.mu.Lock()
-	defer dialer.mu.Unlock()
-	require.NotEqual(t, firstExit, dialer.proxyURLs[1])
-	require.NotNil(t, firstConn)
-	firstConn.mu.Lock()
-	defer firstConn.mu.Unlock()
-	require.Len(t, firstConn.writes, 2)
-	require.NotEmpty(t, firstConn.writes[0]["prompt_cache_key"])
-	require.Equal(t, firstConn.writes[0]["prompt_cache_key"], firstConn.writes[1]["prompt_cache_key"])
-	firstInput := firstConn.writes[0]["input"].([]any)
-	secondInput := firstConn.writes[1]["input"].([]any)
-	require.Equal(t, firstInput[0], secondInput[0], "the reusable request prefix must survive consecutive sends")
-}
-
-func TestOpenAIRequestProxyWSSSEHandshakeFallsBackThroughLeasedExit(t *testing.T) {
-	httpExits := make(chan string, 1)
-	fixture, account := localBPSRequestProxyFixture(t, 2, func(_ int, w http.ResponseWriter, r *http.Request) {
-		httpExits <- "http://" + r.Context().Value(http.LocalAddrContextKey).(net.Addr).String()
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, bpsRequestCompletedWire)
-	})
-	account.Extra = wsSSETestAccount().Extra
-	account.Extra[OpenAIProxyModeKey] = OpenAIProxyModeRequest
-	account.Extra[OpenAIProxyIDsKey] = []int64{1, 2}
-	account.Extra[OpenAIProxySessionAffinityKey] = true
-	dialer := &wsSSETestDialer{status: http.StatusUpgradeRequired, err: errors.New("test handshake refusal")}
-	svc := wsSSETestService(t, dialer, fixture.httpUpstream)
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	c.Request.Header.Set("Thread-Id", "fallback-thread")
-	SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
-	c.Set("api_key", &APIKey{ID: 100})
-
-	result, err := svc.Forward(t.Context(), c, account, []byte(wsSSETestRequest))
-	require.NoError(t, err)
-	require.False(t, result.OpenAIWSMode)
-	require.Equal(t, "oauth_ws_sse_handshake_fallback", c.GetString("openai_ws_transport_reason"))
-	select {
-	case exit := <-httpExits:
-		dialer.mu.Lock()
-		defer dialer.mu.Unlock()
-		require.Equal(t, []string{exit}, dialer.proxyURLs)
-	default:
-		t.Fatal("HTTP fallback did not use a selected proxy")
-	}
 }
 
 func TestOpenAIRequestProxyForwardCancellationReleasesExitWhileOtherStreamsStayBusy(t *testing.T) {

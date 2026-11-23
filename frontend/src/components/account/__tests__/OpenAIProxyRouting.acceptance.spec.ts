@@ -140,32 +140,25 @@ describe('unified OpenAI proxy routing acceptance', () => {
     expect(wrapper.get('[data-testid="siwc-protocol"] option[value="siwc"]').attributes('disabled')).toBeUndefined()
     await wrapper.get('[data-testid="siwc-protocol"]').setValue('siwc')
     await requestMode(wrapper)
-    await wrapper.get('[data-testid="openai-proxy-session-affinity"]').setValue(true)
     await wrapper.get('[data-testid="bps-proxy-11"]').setValue(true)
     await wrapper.get('[data-testid="bps-proxy-22"]').setValue(true)
     const saved = await saveEdit(wrapper)
     expect(saved).toMatchObject({ proxy_id: 45, concurrency: 6, extra: {
-      fixture: 'retained', openai_siwc: true, openai_proxy_mode: 'request', openai_proxy_ids: [11, 22],
-      openai_request_proxy_session_affinity: true
+      fixture: 'retained', openai_siwc: true, openai_proxy_mode: 'request', openai_proxy_ids: [11, 22]
     } })
     wrapper.unmount()
 
     const reopened = await editModal({ ...original, ...saved })
     expect(reopened.get<HTMLSelectElement>('[data-testid="siwc-protocol"]').element.value).toBe('siwc')
     expect(reopened.get<HTMLInputElement>('[data-testid="openai-proxy-mode-request"]').element.checked).toBe(true)
-    expect(reopened.get<HTMLInputElement>('[data-testid="openai-proxy-session-affinity"]').element.checked).toBe(true)
     await reopened.get('[data-testid="bps-proxy-trigger"]').trigger('click')
     expect(reopened.get<HTMLInputElement>('[data-testid="bps-proxy-11"]').element.checked).toBe(true)
     expect(reopened.get<HTMLInputElement>('[data-testid="bps-proxy-22"]').element.checked).toBe(true)
-    await reopened.get('[data-testid="openai-proxy-mode-single"]').setValue()
-    await reopened.get('[data-testid="openai-proxy-mode-request"]').setValue()
-    expect(reopened.get<HTMLInputElement>('[data-testid="openai-proxy-session-affinity"]').element.checked).toBe(false)
     await reopened.get('[data-testid="openai-proxy-mode-single"]').setValue()
     const single = await saveEdit(reopened)
     expect(single).toMatchObject({ proxy_id: 45, concurrency: 6, extra: {
       openai_siwc: true, openai_proxy_mode: 'single', openai_proxy_ids: [11, 22]
     } })
-    expect(single.extra).not.toHaveProperty('openai_request_proxy_session_affinity')
   })
 
   it.each([false, true])('offers one proxy entry in Create and Edit for BPS=%s', async bps => {
@@ -173,10 +166,8 @@ describe('unified OpenAI proxy routing acceptance', () => {
     for (const wrapper of wrappers) {
       expect(wrapper.findAll('[data-testid="openai-proxy-settings"]')).toHaveLength(1)
       expect(wrapper.findAll('[data-testid="openai-proxy-mode-single"]')).toHaveLength(1)
-      expect(wrapper.find('[data-testid="openai-proxy-session-affinity"]').exists()).toBe(false)
       expect(wrapper.find('[data-testid="bps-proxy-mode-request"]').exists()).toBe(false)
       await requestMode(wrapper)
-      expect(wrapper.get<HTMLInputElement>('[data-testid="openai-proxy-session-affinity"]').element.checked).toBe(false)
       expect(wrapper.findAll('[data-testid="bps-proxy-trigger"]')).toHaveLength(1)
       expect(wrapper.findAll('[data-testid="bps-proxy-11"]')).toHaveLength(1)
       expect(wrapper.find('[data-testid="bps-oauth-models"] [data-testid="bps-proxy-routing"]').exists()).toBe(false)
@@ -211,7 +202,6 @@ describe('unified OpenAI proxy routing acceptance', () => {
 
     const reopened = await editModal({ ...original, ...saved })
     expect(reopened.get<HTMLInputElement>('[data-testid="openai-proxy-mode-request"]').element.checked).toBe(true)
-    expect(reopened.get<HTMLInputElement>('[data-testid="openai-proxy-session-affinity"]').element.checked).toBe(false)
     await reopened.get('[data-testid="bps-proxy-trigger"]').trigger('click')
     expect(reopened.get<HTMLInputElement>('[data-testid="bps-proxy-22"]').element.checked).toBe(true)
     expect(reopened.get<HTMLInputElement>('[data-testid="bps-proxy-11"]').element.checked).toBe(true)
@@ -220,7 +210,6 @@ describe('unified OpenAI proxy routing acceptance', () => {
     expect(single).toMatchObject({ proxy_id: 45, concurrency: 6, extra: {
       fixture: 'retained', openai_proxy_mode: 'single', openai_proxy_ids: [22, 11]
     } })
-    expect(single.extra).not.toHaveProperty('openai_request_proxy_session_affinity')
     reopened.unmount()
 
     const reopenedSingle = await editModal({ ...original, ...single })
@@ -244,7 +233,6 @@ describe('unified OpenAI proxy routing acceptance', () => {
     await option.trigger('click')
     await wrapper.get('form#create-account-form input[type="text"]').setValue('Proxy group account')
     await requestMode(wrapper)
-    await wrapper.get('[data-testid="openai-proxy-session-affinity"]').setValue(true)
     await wrapper.get('[data-testid="bps-proxy-11"]').setValue(true)
     await wrapper.get('[data-testid="bps-proxy-22"]').setValue(true)
     // The first selection becomes expired before authorization; never use the
@@ -265,7 +253,7 @@ describe('unified OpenAI proxy routing acceptance', () => {
     expect(mocks.exchangeCode).toHaveBeenCalledWith('/admin/openai/exchange-code', expect.objectContaining({ proxy_mode: 'request', proxy_ids: [11, 22] }))
     expect(mocks.exchangeCode.mock.lastCall?.[1]).not.toHaveProperty('proxy_id')
     expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ proxy_id: 45, extra: expect.objectContaining({
-      openai_proxy_mode: 'request', openai_proxy_ids: [11, 22], openai_request_proxy_session_affinity: true
+      openai_proxy_mode: 'request', openai_proxy_ids: [11, 22]
     }) }))
   })
 
