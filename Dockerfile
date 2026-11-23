@@ -25,6 +25,10 @@ ARG NPM_CONFIG_REGISTRY
 
 WORKDIR /app/frontend
 
+# Some dependencies compile native addons during installation on architectures
+# without prebuilt binaries.
+RUN apk add --no-cache python3 make g++
+
 # Install pnpm (pinned to v9 to match CI and keep builds reproducible)
 RUN corepack enable && corepack prepare pnpm@9 --activate
 
