@@ -824,6 +824,11 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// （User-Agent / originator / version 同源自洽），客户端自报身份不会到达上游。
 	if account.UsesOpenAICodexProtocol() {
 		enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
+		applyCodexAccountDeviceIdentity(req.Header, account)
+		// Same self-consistent session envelope as the non-passthrough builder;
+		// conversation_id is a ChatGPT-web-only marker for this wire.
+		applyCodexOutboundEnvelope(req.Header)
+		req.Header.Del("conversation_id")
 	}
 
 	if req.Header.Get("content-type") == "" {

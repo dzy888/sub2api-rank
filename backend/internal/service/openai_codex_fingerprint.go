@@ -77,6 +77,14 @@ const (
 	// codexFingerprintFull 收敛所有标识：installation_id + session_id + thread_id。
 	// 上游看到 1 台设备 + 1 会话 + 1 线程，最激进。
 	codexFingerprintFull codexFingerprintMode = "full"
+	// codexFingerprintSubagent 把账号上所有流量收进同一个会话：
+	// installation_id 与 session_id 收敛为账号级恒定值，每个客户端会话派生成一个
+	// 子线程（thread_id），并按 Codex 的子代理形态标注
+	// x-openai-subagent: collab_spawn / x-codex-parent-thread-id: <根线程>，
+	// 以及在 turn metadata 中声明 thread_source=subagent、subagent_kind=thread_spawn。
+	// 上游看到的是 1 台设备 + 1 会话 + N 个由同一会话派生的子线程——这正是真实
+	// Codex 用户并发开子代理的形状，几十个并发请求因此不会被当作多个独立会话。
+	codexFingerprintSubagent codexFingerprintMode = "subagent"
 )
 
 const (
@@ -116,7 +124,7 @@ func codexFingerprintModeFromExtra(extra map[string]any) codexFingerprintMode {
 	}
 	raw, _ := extra[codexFingerprintModeExtraKey].(string)
 	switch codexFingerprintMode(strings.TrimSpace(raw)) {
-	case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull:
+	case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintSubagent:
 		return codexFingerprintMode(strings.TrimSpace(raw))
 	default:
 		return codexFingerprintOff
@@ -125,7 +133,7 @@ func codexFingerprintModeFromExtra(extra map[string]any) codexFingerprintMode {
 
 func codexFingerprintModeRequiresSeed(mode codexFingerprintMode) bool {
 	switch mode {
-	case codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull:
+	case codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintSubagent:
 		return true
 	default:
 		return false
@@ -272,6 +280,10 @@ type codexFingerprintIDs struct {
 	turnStartedAtUnixMs           int64
 	originalBodySessionID         string
 	originalBodySessionIDCaptured bool
+	// subagent 模式专用：本会话的根线程与派生形态。
+	parentThreadID string
+	subagentKind   string
+	threadSource   string
 }
 
 // resolveCodexFingerprintIDs 按收敛模式计算出站 ID 集合。
@@ -319,9 +331,44 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 		ids.turnID = uuid.Must(uuid.NewV7()).String()
 		ids.windowID = ids.threadID + ":0"
 		return ids
+
+	case codexFingerprintSubagent:
+		ids.sessionID = resolveConvergedSessionID(seed)
+		ids.parentThreadID = resolveConvergedRootThreadID(seed)
+		ids.threadID = resolveConvergedSubagentThreadID(seed, clientSessionID)
+		ids.turnID = uuid.Must(uuid.NewV7()).String()
+		ids.windowID = ids.threadID + ":0"
+		ids.subagentKind = openAICodexSubagentKindThreadSpawn
+		ids.threadSource = openAICodexThreadSourceSubagent
+		return ids
 	}
 
 	return nil
+}
+
+// resolveConvergedRootThreadID 返回会话的根线程：子代理的 parent_thread_id。
+// 与 session_id 一样是账号级恒定值，让上游看到稳定的“父会话”。
+func resolveConvergedRootThreadID(seed string) string {
+	if seed == "" {
+		return ""
+	}
+	return deriveStableUUIDv4("sub2api:codex-root-thread-id:v1:" + seed)
+}
+
+// resolveConvergedSubagentThreadID 为每个客户端会话派生一个子线程。
+//
+// 有客户端身份时确定性派生，同一会话的后续 turn 落在同一线程；没有身份时
+// （例如网关自行合成的并发请求）每个请求生成一个新线程，于是几十个并发请求
+// 呈现为同一会话里并行 spawn 的多个子代理，而不是同一线程上的并发 turn——
+// 后者在真实 Codex 里几乎不会出现。
+func resolveConvergedSubagentThreadID(seed, clientSessionID string) string {
+	if seed == "" {
+		return ""
+	}
+	if clientSessionID == "" {
+		return uuid.Must(uuid.NewV7()).String()
+	}
+	return deriveStableUUIDv4("sub2api:codex-subagent-thread-id:v1:" + seed + ":" + clientSessionID)
 }
 
 // extractClientSessionID 从请求头中提取客户端原始的会话标识。
@@ -369,7 +416,7 @@ func applyCodexFingerprintHeaders(h http.Header, ids *codexFingerprintIDs) {
 		return
 	}
 
-	// session / full 模式：改写所有相关头
+	// session / full / subagent 模式：改写所有相关头
 	h.Set("x-codex-window-id", ids.windowID)
 	h.Set("x-client-request-id", ids.threadID)
 	// 连字符形式和下划线形式都改写，保证一致
@@ -377,14 +424,33 @@ func applyCodexFingerprintHeaders(h http.Header, ids *codexFingerprintIDs) {
 	h.Set("session_id", ids.sessionID)
 	h.Set("thread-id", ids.threadID)
 
-	rewriteCodexTurnMetadataFields(h, map[string]any{
+	fields := map[string]any{
 		"installation_id":         ids.installationID,
 		"session_id":              ids.sessionID,
 		"thread_id":               ids.threadID,
 		"turn_id":                 ids.turnID,
 		"window_id":               ids.windowID,
 		"turn_started_at_unix_ms": ids.turnStartedAtUnixMs,
-	})
+	}
+	if ids.mode == codexFingerprintSubagent {
+		// 让每个并发请求都声明成同一个会话派生出的子代理线程。真实 Codex 的
+		// 子代理请求同时携带 x-openai-subagent 与 x-codex-parent-thread-id，
+		// 并在 turn metadata 里写 thread_source / subagent_kind / parent_thread_id。
+		h.Set(openAICodexSubagentHeader, openAICodexSubagentThreadSpawnValue)
+		if ids.parentThreadID != "" {
+			h.Set(openAICodexParentThreadIDHeader, ids.parentThreadID)
+			fields["parent_thread_id"] = ids.parentThreadID
+		}
+		if ids.threadSource != "" {
+			fields["thread_source"] = ids.threadSource
+		}
+		if ids.subagentKind != "" {
+			fields["subagent_kind"] = ids.subagentKind
+		}
+		// 子代理轮次不声明 request_kind，与真实 Codex 保持一致（未声明视同 turn）。
+		delete(fields, "request_kind")
+	}
+	rewriteCodexTurnMetadataFields(h, fields)
 }
 
 // rewriteCodexTurnMetadataFields 解析 x-codex-turn-metadata 头中的 JSON，
@@ -455,20 +521,36 @@ func applyCodexFingerprintToClientMetadataMap(existing map[string]any, ids *code
 		return modified
 	}
 
-	// session / full 模式
+	// session / full / subagent 模式
 	existing["session_id"] = ids.sessionID
 	existing["thread_id"] = ids.threadID
 	existing["turn_id"] = ids.turnID
 	existing["x-codex-window-id"] = ids.windowID
 
-	rewriteClientMetadataEmbeddedTurnMetadata(existing, map[string]any{
+	fields := map[string]any{
 		"installation_id":         ids.installationID,
 		"session_id":              ids.sessionID,
 		"thread_id":               ids.threadID,
 		"turn_id":                 ids.turnID,
 		"window_id":               ids.windowID,
 		"turn_started_at_unix_ms": ids.turnStartedAtUnixMs,
-	})
+	}
+	if ids.mode == codexFingerprintSubagent {
+		// 与出站头保持同一份子代理身份：flat client_metadata 与内嵌
+		// x-codex-turn-metadata 都必须声明同一个父线程与子代理类型。
+		existing[openAICodexSubagentHeader] = openAICodexSubagentThreadSpawnValue
+		if ids.parentThreadID != "" {
+			existing[openAICodexParentThreadIDHeader] = ids.parentThreadID
+			fields["parent_thread_id"] = ids.parentThreadID
+		}
+		if ids.threadSource != "" {
+			fields["thread_source"] = ids.threadSource
+		}
+		if ids.subagentKind != "" {
+			fields["subagent_kind"] = ids.subagentKind
+		}
+	}
+	rewriteClientMetadataEmbeddedTurnMetadata(existing, fields)
 	return true
 }
 
@@ -504,7 +586,9 @@ func shouldRewriteCodexFingerprintPromptCacheKey(ids *codexFingerprintIDs, promp
 	if ids == nil || !ids.originalBodySessionIDCaptured || ids.originalBodySessionID == "" || ids.sessionID == "" {
 		return false
 	}
-	if ids.mode != codexFingerprintSession && ids.mode != codexFingerprintFull {
+	// subagent 模式同样让 prompt_cache_key 跟随收敛后的 session：子代理共享父
+	// 会话的缓存命名空间，正是真实 Codex 的行为。
+	if ids.mode != codexFingerprintSession && ids.mode != codexFingerprintFull && ids.mode != codexFingerprintSubagent {
 		return false
 	}
 	return promptCacheKey == ids.originalBodySessionID

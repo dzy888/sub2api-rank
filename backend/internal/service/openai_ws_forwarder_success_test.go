@@ -469,10 +469,18 @@ func TestOpenAIGatewayService_BuildOpenAIWSHeadersDeviceModePreservesNamespacedC
 	require.NoError(t, err)
 	require.Equal(t, ids.installationID, headers.Get("x-codex-installation-id"))
 	require.NotEqual(t, "client-installation", headers.Get("x-codex-installation-id"))
-	require.Equal(t, scopeCodexAccountIdentityValue(account, 0, "window", "client-window"), headers.Get("x-codex-window-id"))
-	require.Equal(t, scopeCodexAccountIdentityValue(account, 0, "session", "client-session"), headers.Get("session-id"))
+	// The envelope derives the window from the (already account-scoped) thread
+	// so header, turn metadata and window agree; the thread itself remains the
+	// account-scoped value.
+	require.Equal(t, headers.Get("thread-id")+":0", headers.Get("x-codex-window-id"))
+	// Both spellings must carry the same scoped session: the builder writes the
+	// underscore header, and the envelope aligns the hyphen form to it.
+	require.NotEqual(t, "client-session", headers.Get("session_id"))
+	require.Equal(t, headers.Get("session_id"), headers.Get("session-id"))
 	require.Equal(t, scopeCodexAccountIdentityValue(account, 0, "thread", "client-thread"), headers.Get("thread-id"))
-	require.Equal(t, scopeCodexAccountIdentityValue(account, 0, "request", "client-request"), headers.Get("x-client-request-id"))
+	// x-client-request-id is Codex's projection of the thread id; the envelope
+	// aligns it so header and turn metadata never disagree.
+	require.Equal(t, headers.Get("thread-id"), headers.Get("x-client-request-id"))
 }
 
 func TestLogOpenAIWSBindResponseAccountWarn(t *testing.T) {
@@ -809,7 +817,10 @@ func TestOpenAIGatewayService_Forward_WSv2_OAuthStoreFalseByDefault(t *testing.T
 	// OAuth 账号的 session_id/conversation_id 应同时按 API key 和上游账号隔离，
 	// 测试中未设置 api_key 到 context，apiKeyID=0。
 	require.Equal(t, isolateOpenAIUpstreamSessionID(0, account, "sess-oauth-1"), captureDialer.lastHeaders.Get("session_id"))
-	require.Equal(t, isolateOpenAIUpstreamSessionID(0, account, "conv-oauth-1"), captureDialer.lastHeaders.Get("conversation_id"))
+	// Codex clients do not send conversation_id; the envelope keeps thread-id in
+	// step with session-id instead.
+	require.Empty(t, captureDialer.lastHeaders.Get("conversation_id"))
+	require.Equal(t, captureDialer.lastHeaders.Get("session_id"), captureDialer.lastHeaders.Get("thread-id"))
 }
 
 func TestOpenAIGatewayService_Forward_WSv2_OAuthSanitizesInvalidNativeToolItemID(t *testing.T) {

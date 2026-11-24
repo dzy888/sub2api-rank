@@ -116,15 +116,12 @@ func (u *issue600Upstream) rejectedSnapshot() ([]http.Header, [][]byte) {
 	return append([]http.Header(nil), u.rejectedHeaders...), append([][]byte(nil), u.rejectedBodies...)
 }
 
-// The HTTP request builder deliberately omits thread-id. WS handshakes carry
-// its projected value. Assert each actual transport policy explicitly.
+// Every transport now emits the same projected thread id on the wire, because a
+// real Codex client always carries thread-id next to session-id. The header must
+// agree with the body projection rather than echoing whatever the caller sent.
 func issue600ProjectedHeader(t *testing.T, mode string, header http.Header, projected string) {
 	t.Helper()
-	if mode == service.OpenAIWSIngressModeHTTPBridge {
-		require.Empty(t, header.Get("thread-id"), "HTTP bridge must keep the existing thread-header allowlist")
-	} else {
-		require.Equal(t, projected, header.Get("thread-id"), "outbound header/body projection must agree")
-	}
+	require.Equal(t, projected, header.Get("thread-id"), "outbound header/body projection must agree (%s)", mode)
 }
 
 func issue600Thread(body []byte) string {

@@ -913,7 +913,10 @@ func TestBuildUpstreamRequestOpenAIPassthrough_OffModeKeepsIsolatedSession(t *te
 
 	assert.NotEmpty(t, req.Header.Get("session_id"))
 	assert.NotEqual(t, resolveConvergedSessionID(testCodexFingerprintSeed), req.Header.Get("session_id"), "off 模式不得收敛 session_id")
-	assert.Empty(t, req.Header.Get("x-codex-window-id"))
+	// The envelope always emits a window-id, but it must derive from the
+	// non-converged thread rather than the account-level converged session.
+	assert.NotEqual(t, resolveConvergedSessionID(testCodexFingerprintSeed)+":0", req.Header.Get("x-codex-window-id"))
+	assert.Equal(t, req.Header.Get("thread-id")+":0", req.Header.Get("x-codex-window-id"))
 }
 
 func TestApplyCodexFingerprintClientMetadataRaw_NonObjectBodyUntouched(t *testing.T) {
@@ -927,4 +930,125 @@ func TestApplyCodexFingerprintClientMetadataRaw_NonObjectBodyUntouched(t *testin
 		assert.False(t, changed, "非 JSON 对象 body 不应被改写: %s", body)
 		assert.Equal(t, []byte(body), out)
 	}
+}
+
+// --- subagent 模式：单会话 + 并发子代理 ---
+
+func TestResolveCodexFingerprintIDs_SubagentMode(t *testing.T) {
+	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "subagent"})
+	require.Equal(t, codexFingerprintSubagent, account.GetCodexFingerprintMode())
+	seed, ok := codexFingerprintSeed(account.Extra)
+	require.True(t, ok)
+
+	headers := func(session string) http.Header {
+		h := http.Header{}
+		if session != "" {
+			h.Set("session-id", session)
+		}
+		return h
+	}
+
+	// 同一客户端会话 → 同一会话、同一父线程、同一子线程。
+	a := resolveCodexFingerprintIDsFromRequest(account, headers("cli-1"))
+	b := resolveCodexFingerprintIDsFromRequest(account, headers("cli-1"))
+	require.NotNil(t, a)
+	require.Equal(t, a.sessionID, b.sessionID)
+	require.Equal(t, a.parentThreadID, b.parentThreadID)
+	require.Equal(t, a.threadID, b.threadID)
+	require.NotEqual(t, a.turnID, b.turnID, "每个 turn 必须有自己的 turn_id")
+	require.Equal(t, resolveConvergedSessionID(seed), a.sessionID, "所有并发共享同一会话")
+	require.Equal(t, resolveConvergedRootThreadID(seed), a.parentThreadID, "父线程是账号级恒定值")
+
+	// 不同客户端会话 → 同会话同父线程，但子线程不同。
+	c := resolveCodexFingerprintIDsFromRequest(account, headers("cli-2"))
+	require.Equal(t, a.sessionID, c.sessionID)
+	require.Equal(t, a.parentThreadID, c.parentThreadID)
+	require.NotEqual(t, a.threadID, c.threadID, "不同客户端会话是不同的子代理线程")
+
+	// 无客户端身份（网关自行合成的并发）→ 每次一个新子线程，同会话同父线程。
+	d := resolveCodexFingerprintIDsFromRequest(account, headers(""))
+	e := resolveCodexFingerprintIDsFromRequest(account, headers(""))
+	require.Equal(t, a.sessionID, d.sessionID)
+	require.Equal(t, a.parentThreadID, d.parentThreadID)
+	require.NotEqual(t, d.threadID, e.threadID, "无身份时必须各自成线程，不能并发撞同一线程")
+}
+
+func TestApplyCodexFingerprintHeaders_SubagentMode(t *testing.T) {
+	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "subagent"})
+	h := http.Header{}
+	h.Set("x-codex-turn-metadata", `{"installation_id":"x","session_id":"x","thread_id":"x","turn_id":"x","window_id":"x:0","sandbox":"seatbelt"}`)
+	ids := resolveCodexFingerprintIDs(account, "cli-1", codexFingerprintSubagent)
+	require.NotNil(t, ids)
+	applyCodexFingerprintHeaders(h, ids)
+
+	assert.Equal(t, ids.sessionID, h.Get("session-id"))
+	assert.Equal(t, ids.sessionID, h.Get("session_id"))
+	assert.Equal(t, ids.threadID, h.Get("thread-id"))
+	assert.Equal(t, ids.threadID, h.Get("x-client-request-id"))
+	assert.Equal(t, ids.threadID+":0", h.Get("x-codex-window-id"))
+	assert.Equal(t, openAICodexSubagentThreadSpawnValue, h.Get(openAICodexSubagentHeader))
+	assert.Equal(t, ids.parentThreadID, h.Get(openAICodexParentThreadIDHeader))
+
+	turnMetadata := h.Get("x-codex-turn-metadata")
+	assert.Contains(t, turnMetadata, `"thread_source":"subagent"`)
+	assert.Contains(t, turnMetadata, `"subagent_kind":"thread_spawn"`)
+	assert.Contains(t, turnMetadata, ids.parentThreadID)
+	assert.Contains(t, turnMetadata, `"sandbox":"seatbelt"`, "未指定字段必须保留")
+}
+
+func TestApplyCodexFingerprintClientMetadata_SubagentMode(t *testing.T) {
+	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "subagent"})
+	ids := resolveCodexFingerprintIDs(account, "cli-1", codexFingerprintSubagent)
+	require.NotNil(t, ids)
+
+	body := map[string]any{
+		"client_metadata": map[string]any{
+			"session_id":            "client-session",
+			"x-codex-turn-metadata": `{"installation_id":"old","thread_source":"user"}`,
+		},
+	}
+	require.True(t, applyCodexFingerprintClientMetadata(body, ids))
+	metadata := body["client_metadata"].(map[string]any)
+	assert.Equal(t, ids.sessionID, metadata["session_id"])
+	assert.Equal(t, ids.threadID, metadata["thread_id"])
+	assert.Equal(t, ids.parentThreadID, metadata[openAICodexParentThreadIDHeader])
+	assert.Equal(t, openAICodexSubagentThreadSpawnValue, metadata[openAICodexSubagentHeader])
+	embedded := metadata["x-codex-turn-metadata"].(string)
+	assert.Contains(t, embedded, `"thread_source":"subagent"`)
+	assert.Contains(t, embedded, ids.parentThreadID)
+}
+
+func TestApplyCodexOutboundEnvelopeAlignsIdentityTriple(t *testing.T) {
+	h := http.Header{}
+	h.Set("session-id", "s-1")
+	h.Set("x-codex-turn-metadata", `{"session_id":"s-1","thread_id":"t-1"}`)
+	applyCodexOutboundEnvelope(h)
+	assert.Equal(t, "s-1", h.Get("session-id"))
+	assert.Equal(t, "s-1", h.Get("session_id"))
+	assert.Equal(t, "t-1", h.Get("thread-id"))
+	assert.Equal(t, "t-1", h.Get("x-client-request-id"))
+	assert.Equal(t, "t-1:0", h.Get("x-codex-window-id"))
+	assert.Equal(t, openAICodexExcludeValue, h.Get(openAICodexExcludeHeader))
+	assert.Equal(t, openAICodexExcludeStreamFieldsValue, h.Get(openAICodexExcludeStreamFieldsHeader))
+
+	// 只有 thread-id 时，session-id 必须与它一致，不能留下两套身份。
+	onlyThread := http.Header{}
+	onlyThread.Set("thread-id", "t-2")
+	applyCodexOutboundEnvelope(onlyThread)
+	assert.Equal(t, "t-2", onlyThread.Get("session-id"))
+	assert.Equal(t, "t-2", onlyThread.Get("thread-id"))
+
+	// window-id 的线程段与 thread-id 不一致时以 thread-id 为准。
+	mismatch := http.Header{}
+	mismatch.Set("thread-id", "t-3")
+	mismatch.Set("x-codex-window-id", "other:0")
+	applyCodexOutboundEnvelope(mismatch)
+	assert.Equal(t, "t-3:0", mismatch.Get("x-codex-window-id"))
+
+	// 完全无身份时补齐一套自洽的值，不产生空头。
+	empty := http.Header{}
+	applyCodexOutboundEnvelope(empty)
+	assert.NotEmpty(t, empty.Get("session-id"))
+	assert.Equal(t, empty.Get("session-id"), empty.Get("thread-id"))
+	assert.Equal(t, empty.Get("thread-id")+":0", empty.Get("x-codex-window-id"))
 }

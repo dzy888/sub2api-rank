@@ -98,6 +98,9 @@ func restoreBoundCodexTicketHarvestIdentity(h http.Header, ticket *openAICodexTi
 	if prevBeta == openAIWSBetaV1Value || prevBeta == openAIWSBetaV2Value {
 		h.Set("OpenAI-Beta", prevBeta)
 	}
+	// The ticket owns session_id; rebuild the rest of the identity from it. The
+	// envelope ran before this point and its values were just deleted.
+	applyCodexOutboundEnvelope(h)
 }
 
 func (s *OpenAIGatewayService) restoreBoundCodexTicketHarvestIdentity(ctx context.Context, h http.Header, account *Account) {

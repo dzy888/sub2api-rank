@@ -2222,6 +2222,11 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// 客户端自报身份不参与构造，浏览器型 UA 也因此不会再到达上游（原浏览器 UA 兜底已被吸收）。
 	if account.UsesOpenAICodexProtocol() {
 		enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
+		applyCodexAccountDeviceIdentity(req.Header, account)
+		// A real Codex client always carries the full, self-consistent session
+		// envelope. conversation_id is a ChatGPT-web marker, not Codex CLI.
+		applyCodexOutboundEnvelope(req.Header)
+		req.Header.Del("conversation_id")
 	}
 
 	// Ensure required headers exist

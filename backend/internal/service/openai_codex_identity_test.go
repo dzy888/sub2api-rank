@@ -2,6 +2,7 @@ package service
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -345,4 +346,41 @@ func TestCodexCanonicalUserAgentFallsBackWithoutResolver(t *testing.T) {
 
 	require.Equal(t, codexCLIUserAgent, CodexCanonicalUserAgent())
 	require.Equal(t, codexCLIVersion, CodexCanonicalClientVersion())
+}
+
+func TestApplyCodexAccountDeviceIdentity(t *testing.T) {
+	withSeed := func(id int64, seed string) *Account {
+		return &Account{ID: id, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+			Extra: map[string]any{codexFingerprintSeedExtraKey: seed}}
+	}
+	seedA := "11111111-1111-4111-8111-111111111111"
+	seedB := "22222222-2222-4222-8222-222222222222"
+
+	h := http.Header{}
+	h.Set("user-agent", "codex_cli_rs/0.172.0 (Ubuntu 22.4.0; x86_64) xterm-256color")
+	applyCodexAccountDeviceIdentity(h, withSeed(1, seedA))
+	ua := h.Get("user-agent")
+	require.True(t, strings.HasPrefix(ua, "codex_cli_rs/0.172.0 ("), "版本段必须保留: %s", ua)
+	require.NotContains(t, ua, "(Ubuntu 22.4.0; x86_64) xterm-256color", "固定设备串必须被替换")
+
+	// 同一账号稳定。
+	again := http.Header{}
+	again.Set("user-agent", "codex_cli_rs/0.172.0 (Ubuntu 22.4.0; x86_64) xterm-256color")
+	applyCodexAccountDeviceIdentity(again, withSeed(1, seedA))
+	require.Equal(t, ua, again.Get("user-agent"))
+
+	// 无种子账号保持原样。
+	noSeed := http.Header{}
+	noSeed.Set("user-agent", codexCLIUserAgent)
+	applyCodexAccountDeviceIdentity(noSeed, &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
+	require.Equal(t, codexCLIUserAgent, noSeed.Get("user-agent"))
+
+	// 不同账号的 UA 仍是一个合法的 Codex 身份（originator 与首段配套）。
+	other := http.Header{}
+	other.Set("user-agent", "codex_cli_rs/0.172.0 (Ubuntu 22.4.0; x86_64) xterm-256color")
+	applyCodexAccountDeviceIdentity(other, withSeed(3, seedB))
+	originator, paired, ok := openai.PairCodexClientIdentity(other.Get("user-agent"))
+	require.True(t, ok)
+	require.Equal(t, openai.CodexCLIOriginator, originator)
+	require.Equal(t, other.Get("user-agent"), paired)
 }

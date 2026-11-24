@@ -195,6 +195,11 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	// 管理员显式配置传入（上面写进 headers 的值只在强制统一被关闭时才参与配对）。
 	if account != nil && account.UsesOpenAICodexProtocol() {
 		enforceCodexIdentityHeadersWithUA(headers, s.codexIdentityOverrideUA(account))
+		applyCodexAccountDeviceIdentity(headers, account)
+		// Same self-consistent session envelope as the HTTP builders; the WS
+		// handshake must not disagree with the body about who the session is.
+		applyCodexOutboundEnvelope(headers)
+		headers.Del("conversation_id")
 	}
 
 	// 账号级请求头覆写（仅 openai api_key 账号启用时生效；OAuth 路径 no-op）。

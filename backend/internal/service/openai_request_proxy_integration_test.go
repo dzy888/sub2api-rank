@@ -210,6 +210,112 @@ func TestOpenAIRequestProxyForwardSessionAffinityPinsAuthenticatedResponses(t *t
 	require.Equal(t, first, nextTurn)
 }
 
+func TestOpenAIRequestProxyMockSharedSessionDoesNotMergeConcurrentRequests(t *testing.T) {
+	// This exercises Forward and the local proxy boundary. Handler-level account
+	// slot admission remains a separate account-scoped gate.
+	const requestCount = 24
+
+	for _, sessionAffinity := range []bool{false, true} {
+		name := "per_request"
+		if sessionAffinity {
+			name = "session_affinity"
+		}
+		t.Run(name, func(t *testing.T) {
+			type observedRequest struct {
+				proxyID  int
+				session  string
+				threadID string
+			}
+			arrived := make(chan observedRequest, requestCount)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+			var activeMu sync.Mutex
+			active, maxActive := 0, 0
+
+			svc, account := localBPSRequestProxyFixture(t, 3, func(proxyID int, w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				activeMu.Lock()
+				active++
+				if active > maxActive {
+					maxActive = active
+				}
+				activeMu.Unlock()
+				arrived <- observedRequest{proxyID: proxyID, session: r.Header.Get("session_id"), threadID: r.Header.Get("thread-id")}
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					return
+				}
+				activeMu.Lock()
+				active--
+				activeMu.Unlock()
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, bpsRequestCompletedWire)
+			})
+			account.Extra["openai_excel_bps"] = false
+			account.Extra[OpenAIProxyModeKey] = OpenAIProxyModeRequest
+			account.Extra[OpenAIProxyIDsKey] = []int64{1, 2, 3}
+			if sessionAffinity {
+				account.Extra[OpenAIProxySessionAffinityKey] = true
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			done := make(chan error, requestCount)
+			for i := 0; i < requestCount; i++ {
+				go func(turn int) {
+					requestAccount := *account
+					requestAccount.Extra = cloneExcelBPSRecoveryExtra(account.Extra)
+					requestAccount.Credentials = cloneExcelBPSRecoveryExtra(account.Credentials)
+					body := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":"turn-%02d","stream":true,"prompt_cache_key":"shared-session"}`, turn))
+					rec := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(rec)
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body)).WithContext(ctx)
+					c.Request.Header.Set("session_id", "shared-session-id")
+					c.Request.Header.Set("thread-id", "shared-thread-id")
+					c.Set("api_key", &APIKey{ID: 77331})
+					result, err := svc.Forward(ctx, c, &requestAccount, body)
+					if err == nil && (result == nil || rec.Code != http.StatusOK) {
+						err = fmt.Errorf("incomplete mock response: status %d", rec.Code)
+					}
+					done <- err
+				}(i)
+			}
+
+			hits := make(map[int]int)
+			sessionIDs := make(map[string]int)
+			threadIDs := make(map[string]int)
+			for i := 0; i < requestCount; i++ {
+				select {
+				case request := <-arrived:
+					hits[request.proxyID]++
+					sessionIDs[request.session]++
+					threadIDs[request.threadID]++
+				case <-ctx.Done():
+					t.Fatalf("only %d of %d mock requests reached the local exits: %v", i, requestCount, ctx.Err())
+				}
+			}
+			releaseOnce.Do(func() { close(release) })
+			for i := 0; i < requestCount; i++ {
+				require.NoError(t, <-done)
+			}
+
+			activeMu.Lock()
+			observedMaxActive := maxActive
+			activeMu.Unlock()
+			require.Len(t, sessionIDs, 1, "all independent requests carried the same session_id")
+			require.Len(t, threadIDs, 1, "all independent requests carried the same thread-id")
+			require.Equal(t, requestCount, observedMaxActive, "the fake upstream must observe all requests concurrently")
+			if sessionAffinity {
+				require.Len(t, hits, 1, "session affinity pins the shared conversation to one exit")
+			} else {
+				require.Equal(t, map[int]int{1: 8, 2: 8, 3: 8}, hits, "per-request mode spreads the shared session across exits")
+			}
+		})
+	}
+}
+
 func TestOpenAIRequestProxyForwardCancellationReleasesExitWhileOtherStreamsStayBusy(t *testing.T) {
 	arrived := make(chan int, 4)
 	svc, account := localBPSRequestProxyFixture(t, 3, func(id int, w http.ResponseWriter, r *http.Request) {

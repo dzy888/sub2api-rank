@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -164,6 +166,67 @@ func resolveCodexOutboundIdentity(candidateUA string) codexOutboundIdentity {
 	return codexOutboundIdentity{userAgent: pairedUA, originator: originator, version: version}
 }
 
+// codexDeviceProfile 是 UA 尾部「(OS OS版本; arch) terminal」的设备指纹。
+// 真实 Codex 客户端从运行环境采集这一段，稳定、合法，且与版本段无关。
+type codexDeviceProfile struct {
+	os       string
+	osVer    string
+	arch     string
+	terminal string
+}
+
+func (p codexDeviceProfile) String() string {
+	return fmt.Sprintf(" (%s %s; %s) %s", p.os, p.osVer, p.arch, p.terminal)
+}
+
+// codexDeviceProfiles 是官方 Codex CLI 真实运行环境的常见组合。
+// 网关原先对每个账号都发同一段 Ubuntu/xterm，账号一多，这段固定串本身就成了
+// 「同一台机器上跑着一堆 Codex」的指纹。按账号确定性取一份，既跨账号分散，
+// 又保证同一账号长期自洽。
+var codexDeviceProfiles = [...]codexDeviceProfile{
+	{"Mac OS X", "14.7.0", "arm64", "iTerm.app/3.5.14"},
+	{"Mac OS X", "15.1.0", "arm64", "Apple_Terminal/455"},
+	{"Mac OS X", "14.5.0", "arm64", "vscode/1.96.2"},
+	{"Ubuntu", "24.4.0", "x86_64", "xterm-256color"},
+	{"Ubuntu", "22.4.0", "x86_64", "tmux"},
+	{"Linux", "6.8.0", "x86_64", "Alacritty"},
+	{"Mac OS X", "13.6.0", "arm64", "WarpTerminal"},
+}
+
+// resolveCodexDeviceSuffix 按账号种子确定性选择一份设备指纹。
+// 无种子（未开收敛的账号）时返回空串，由调用方保留 canonical UA 原样。
+func resolveCodexDeviceSuffix(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	seed, ok := codexFingerprintSeed(account.Extra)
+	if !ok {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("sub2api:codex-device-profile:v1:" + seed))
+	return codexDeviceProfiles[int(sum[0])%len(codexDeviceProfiles)].String()
+}
+
+// applyCodexAccountDeviceIdentity 只替换 UA 的设备指纹段，originator 与版本段
+// 保持 enforceCodexIdentityHeaders 已经统一好的值，三者仍同源自洽。
+func applyCodexAccountDeviceIdentity(h http.Header, account *Account) {
+	suffix := resolveCodexDeviceSuffix(account)
+	if h == nil || suffix == "" {
+		return
+	}
+	ua := strings.TrimSpace(h.Get("user-agent"))
+	slash := strings.IndexByte(ua, '/')
+	if slash <= 0 {
+		return
+	}
+	rest := ua[slash:]
+	// 截断到第一个空格：`{client}/{version}` 之后的部分全部是环境指纹。
+	if space := strings.IndexByte(rest, ' '); space >= 0 {
+		rest = rest[:space]
+	}
+	h.Set("user-agent", ua[:slash]+rest+suffix)
+}
+
 // codexClientVersionFromUA 取 UA 的版本段作为生效版本；
 // 非法或低于上游门槛（低于则上游 404，issue #3901）时回退编译期常量。
 func codexClientVersionFromUA(ua string) string {
@@ -172,6 +235,90 @@ func codexClientVersionFromUA(ua string) string {
 		return codexCLIVersion
 	}
 	return version
+}
+
+// Latest Codex HTTP envelope markers. A real Codex client always declares the
+// response fields it can omit; relays that only imitate the older handshake are
+// easy to separate from the official client on these two headers alone.
+const (
+	openAICodexExcludeHeader             = "x-codex-exclude"
+	openAICodexExcludeValue              = "tools,usage.attribution"
+	openAICodexExcludeStreamFieldsHeader = "x-codex-exclude-stream-fields"
+	openAICodexExcludeStreamFieldsValue  = "delta.sequence_number,reasoning.added.encrypted_content"
+	openAICodexParentThreadIDHeader      = "x-codex-parent-thread-id"
+	openAICodexSubagentHeader            = "x-openai-subagent"
+	openAICodexSubagentThreadSpawnValue  = "collab_spawn"
+	openAICodexThreadSourceSubagent      = "subagent"
+	openAICodexSubagentKindThreadSpawn   = "thread_spawn"
+	openAICodexWindowIDSuffix            = ":0"
+)
+
+// applyCodexOutboundEnvelope makes the session identity triple self-consistent
+// on the wire. A real Codex client always sends session-id, thread-id,
+// x-client-request-id and x-codex-window-id together, and the turn metadata
+// carries the same values. Builders that only forwarded whichever identity the
+// caller happened to send produced mismatched pairs that upstream can correlate
+// cheaply. The fingerprint stage runs first, so a converged identity wins; this
+// only fills and aligns.
+func applyCodexOutboundEnvelope(h http.Header) {
+	if h == nil {
+		return
+	}
+	// The builder-owned underscore header is authoritative: it carries the
+	// API-key/account-scoped session. The hyphen form is the client's own value
+	// and is only a fallback.
+	sessionID := firstNonEmptyHeaderValue(h, "session_id", "session-id", "conversation_id")
+	threadID := firstNonEmptyHeaderValue(h, "thread-id")
+	if threadID == "" {
+		threadID = codexTurnMetadataThreadID(h.Get("x-codex-turn-metadata"))
+	}
+	if threadID == "" {
+		threadID = codexWindowIDThreadID(h.Get("x-codex-window-id"))
+	}
+	if sessionID == "" {
+		sessionID = threadID
+	}
+	if threadID == "" {
+		threadID = sessionID
+	}
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+		threadID = sessionID
+	}
+	windowID := h.Get("x-codex-window-id")
+	if codexWindowIDThreadID(windowID) != threadID {
+		windowID = threadID + openAICodexWindowIDSuffix
+	}
+	h.Set("session-id", sessionID)
+	h.Set("session_id", sessionID)
+	h.Set("thread-id", threadID)
+	h.Set("x-client-request-id", threadID)
+	h.Set("x-codex-window-id", windowID)
+	h.Set(openAICodexExcludeHeader, openAICodexExcludeValue)
+	h.Set(openAICodexExcludeStreamFieldsHeader, openAICodexExcludeStreamFieldsValue)
+	rewriteCodexTurnMetadataFields(h, map[string]any{
+		"session_id": sessionID,
+		"thread_id":  threadID,
+		"window_id":  windowID,
+	})
+}
+
+func firstNonEmptyHeaderValue(h http.Header, names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(h.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexWindowIDThreadID(window string) string {
+	window = strings.TrimSpace(window)
+	if window == "" {
+		return ""
+	}
+	thread, _, _ := strings.Cut(window, ":")
+	return strings.TrimSpace(thread)
 }
 
 // applyOpenAIAPIKeyIdentityHeaders gives every OpenAI API-key account the same

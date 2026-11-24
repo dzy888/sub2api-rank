@@ -235,11 +235,16 @@ func TestBuildUpstreamRequestOAuthHeaderOnlySession(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, original, c.Request.Header, "upstream projection must not mutate the client identity")
 				if tc.seed == "" {
-					require.Empty(t, req.Header.Get("session_id"))
+					// No client identity: the envelope still has to send a coherent
+					// triple, so session/thread agree with each other. The legacy
+					// conversation_id mirror is gone; upstream is a Codex client.
+					session, thread := req.Header.Get("session_id"), req.Header.Get("thread-id")
+					require.NotEmpty(t, session)
+					require.Equal(t, session, thread)
 					require.Empty(t, req.Header.Get("conversation_id"), "do not reuse a provider pointer as client intent or identity")
 				} else {
 					require.Equal(t, isolateOpenAIUpstreamSessionID(keyID, account, tc.seed), req.Header.Get("session_id"))
-					require.Equal(t, req.Header.Get("session_id"), req.Header.Get("conversation_id"))
+					require.Empty(t, req.Header.Get("conversation_id"))
 					require.NotEqual(t, tc.seed, req.Header.Get("session_id"))
 				}
 				return req.Header

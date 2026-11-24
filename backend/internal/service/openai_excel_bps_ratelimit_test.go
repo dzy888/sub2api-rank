@@ -54,6 +54,11 @@ func (r *excelBPSQuotaRepo) UpdateExtra(ctx context.Context, id int64, updates m
 	return r.updateErr
 }
 
+// updateCodexUsageSnapshot resolves the account first to unwrap proxy replicas.
+func (r *excelBPSQuotaRepo) GetByID(context.Context, int64) (*Account, error) {
+	return &Account{ID: 300, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, nil
+}
+
 func (r *excelBPSQuotaRepo) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {
 	deadline, _ := ctx.Deadline()
 	r.writes <- excelBPSQuotaWrite{accountID: id, resetAt: resetAt, ctxErr: ctx.Err(), deadline: deadline}

@@ -2310,7 +2310,11 @@ func TestOpenAIGatewayService_CodexFingerprintCompactDoesNotRewriteBodyCacheKeyO
 	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
 	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "client_metadata.session_id").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-installation-id").Exists())
-	require.Empty(t, upstream.lastReq.Header.Get("x-codex-window-id"))
+	// Compact skips fingerprint staging, but the outbound envelope still has to
+	// be self-consistent: window-id is derived from the (non-converged) thread.
+	windowID := upstream.lastReq.Header.Get("x-codex-window-id")
+	require.NotEmpty(t, windowID)
+	require.NotEqual(t, resolveConvergedSessionID(seed)+":0", windowID)
 }
 
 func TestOpenAIGatewayService_CodexFingerprintMessagesBridgeDoesNotInjectBodyPromptCacheKey(t *testing.T) {

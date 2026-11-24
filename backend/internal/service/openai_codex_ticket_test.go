@@ -284,7 +284,9 @@ func TestHarvestOpenAICodexTicket_StopsAt292AndUsesHarvestProxy(t *testing.T) {
 	require.Equal(t, "socks5h://user:pass@harvest.example:31", upstream.lastProxyURL)
 	require.Len(t, upstream.requests, 2)
 	require.Empty(t, upstream.requests[0].Header.Get(openAICodexTurnStateHeader))
-	require.Equal(t, openAICodexAstraMinVersion, upstream.requests[0].Header.Get("version"))
+	// Harvest bundles pin their own minimum version; the canonical UA version
+	// may already be newer, so only the floor is asserted.
+	require.GreaterOrEqual(t, CompareVersions(upstream.requests[0].Header.Get("version"), openAICodexAstraMinVersion), 0)
 	require.Equal(t, HTTPUpstreamProfileOpenAIHarvest, HTTPUpstreamProfileFromContext(upstream.requests[0].Context()))
 	require.True(t, upstream.requests[0].Close)
 }
@@ -916,10 +918,12 @@ func TestDoOpenAIUpstream_BoundTicketUsesHarvestProxy(t *testing.T) {
 	require.Equal(t, harvest, upstream.lastProxyURL)
 	require.NotEqual(t, account.Proxy.URL(), upstream.lastProxyURL)
 	require.Equal(t, "harvest-session-sticky", upstream.lastReq.Header.Get("session_id"))
-	require.Empty(t, upstream.lastReq.Header.Get("session-id"))
+	// The harvest identity owns session_id; the envelope rebuilds the rest of
+	// the triple from it, matching what a real Codex client would send.
+	require.Equal(t, "harvest-session-sticky", upstream.lastReq.Header.Get("session-id"))
+	require.Equal(t, "harvest-session-sticky", upstream.lastReq.Header.Get("thread-id"))
 	require.Empty(t, upstream.lastReq.Header.Get("conversation_id"))
 	require.Empty(t, upstream.lastReq.Header.Get("x-codex-installation-id"))
-	require.Empty(t, upstream.lastReq.Header.Get("thread-id"))
 	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "client_metadata").Exists())
 	require.Equal(t, HTTPUpstreamProfileOpenAIHarvest, HTTPUpstreamProfileFromContext(upstream.lastReq.Context()))
@@ -1016,13 +1020,17 @@ func TestPinCodexTicketWSAcquireUsesHarvestProxy(t *testing.T) {
 	require.Equal(t, harvest, proxy)
 	require.NotEqual(t, account.Proxy.URL(), proxy)
 	require.Equal(t, "harvest-session-sticky", h.Get("session_id"))
-	require.Empty(t, h.Get("session-id"))
+	// The harvest bundle owns the session; the envelope derives the rest of the
+	// identity from it so the wire stays self-consistent like a real client.
+	require.Equal(t, "harvest-session-sticky", h.Get("session-id"))
+	require.Equal(t, "harvest-session-sticky", h.Get("thread-id"))
+	require.Equal(t, "harvest-session-sticky", h.Get("x-client-request-id"))
 	require.Empty(t, h.Get("conversation_id"))
 	require.Empty(t, h.Get("x-codex-beta-features"))
 	require.Empty(t, h.Get("x-codex-routing-hint"))
 	require.Equal(t, openAIWSBetaV2Value, h.Get("OpenAI-Beta"))
-	require.Equal(t, openAICodexAstraMinVersion, h.Get("version"))
-	require.Equal(t, buildCodexCLIUserAgent(openAICodexAstraMinVersion), h.Get("user-agent"))
+	require.GreaterOrEqual(t, CompareVersions(h.Get("version"), openAICodexAstraMinVersion), 0)
+	require.Contains(t, h.Get("user-agent"), h.Get("version"))
 }
 
 func TestPinCodexTicketWSAcquireConfiguredHarvestWhenTicketHasNoProxy(t *testing.T) {
@@ -1139,15 +1147,15 @@ func TestBuildUpstreamRequest_BoundTicketPinsHarvestIdentity(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, state, req.Header.Get(openAICodexTurnStateHeader))
 	require.Equal(t, "harvest-session-sticky", req.Header.Get("session_id"))
+	require.Equal(t, "harvest-session-sticky", req.Header.Get("session-id"))
+	require.Equal(t, "harvest-session-sticky", req.Header.Get("thread-id"))
 	require.Empty(t, req.Header.Get("conversation_id"))
-	require.Empty(t, req.Header.Get("session-id"))
-	require.Empty(t, req.Header.Get("thread-id"))
 	require.Empty(t, req.Header.Get("x-codex-installation-id"))
 	require.Empty(t, req.Header.Get("x-codex-beta-features"))
 	require.Empty(t, req.Header.Get("accept-language"))
 	require.Empty(t, req.Header.Get("x-codex-routing-hint"))
-	require.Equal(t, openAICodexAstraMinVersion, req.Header.Get("version"))
-	require.Equal(t, buildCodexCLIUserAgent(openAICodexAstraMinVersion), req.Header.Get("user-agent"))
+	require.GreaterOrEqual(t, CompareVersions(req.Header.Get("version"), openAICodexAstraMinVersion), 0)
+	require.Contains(t, req.Header.Get("user-agent"), req.Header.Get("version"))
 	require.Equal(t, "responses=experimental", req.Header.Get("OpenAI-Beta"))
 	got, err := io.ReadAll(req.Body)
 	require.NoError(t, err)

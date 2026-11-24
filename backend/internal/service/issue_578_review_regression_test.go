@@ -80,6 +80,12 @@ func (r *issue578LifecycleRepo) UpdateExtra(ctx context.Context, _ int64, _ map[
 	return r.write(ctx)
 }
 
+// updateCodexUsageSnapshot resolves the account first to unwrap proxy replicas.
+// The embedded interface is nil here, so a plain account keeps it going.
+func (r *issue578LifecycleRepo) GetByID(context.Context, int64) (*Account, error) {
+	return &Account{ID: 300, Platform: PlatformOpenAI, Type: AccountTypeOAuth}, nil
+}
+
 func TestIssue578ReviewWorkerPermanentErrorAndShutdown(t *testing.T) {
 	for _, mode := range []string{"deleted", "shutdown waiting", "shutdown in flight"} {
 		t.Run(mode, func(t *testing.T) {

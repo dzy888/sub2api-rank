@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -32,7 +31,6 @@ const (
 	openAIWSProxyTransportIdleConnTimeout     = 90 * time.Second
 	openAIWSProxyClientCacheMaxEntries        = 256
 	openAIWSProxyClientCacheIdleTTL           = 15 * time.Minute
-	openAIWSTLSSessionCacheSize               = 64
 )
 
 type OpenAIWSTransportMetricsSnapshot struct {
@@ -92,36 +90,14 @@ func newDefaultOpenAIWSClientDialer() openAIWSClientDialer {
 
 func newConfiguredOpenAIWSClientDialer(cfg *config.Config) openAIWSClientDialer {
 	d := &coderOpenAIWSClientDialer{
-		defaultHTTPClient: newOpenAIWSDefaultHTTPClient(),
-		proxyClients:      make(map[string]*openAIWSProxyClientEntry),
+		proxyClients: make(map[string]*openAIWSProxyClientEntry),
 	}
 	if cfg != nil {
 		d.upstreamRoutes, d.upstreamRoutesErr = upstreamroute.New(cfg.Gateway.UpstreamRouting)
 	}
 	return d
 }
-
-// Keep the default client's routing (including environment proxies), but give
-// WS reconnects a persistent TLS session cache without changing global clients.
-func newOpenAIWSDefaultHTTPClient() *http.Client {
-	client := *http.DefaultClient
-	base := client.Transport
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	if transport, ok := base.(*http.Transport); ok {
-		transport = transport.Clone()
-		if transport.TLSClientConfig == nil {
-			transport.TLSClientConfig = &tls.Config{}
-		}
-		transport.TLSClientConfig.ClientSessionCache = tls.NewLRUClientSessionCache(openAIWSTLSSessionCacheSize)
-		client.Transport = transport
-	}
-	return &client
-}
-
 type coderOpenAIWSClientDialer struct {
-	defaultHTTPClient *http.Client
 	upstreamRoutes    *upstreamroute.Router
 	upstreamRoutesErr error
 	proxyMu           sync.Mutex
@@ -183,7 +159,6 @@ func (d *coderOpenAIWSClientDialer) Dial(
 	binding, _ := ctx.Value(requestTimezoneEgressKey{}).(*requestTimezoneBinding)
 	wrapped := &coderOpenAIWSClientConn{timezoneBinding: binding, timezoneProxy: proxyURL}
 	opts := &coderws.DialOptions{
-		HTTPClient:      d.defaultHTTPClient,
 		HTTPHeader:      cloneHeader(headers),
 		CompressionMode: coderws.CompressionContextTakeover,
 		OnPingReceived: func(context.Context, []byte) bool {
@@ -297,11 +272,6 @@ func (d *coderOpenAIWSClientDialer) proxyHTTPClient(proxy string) (*http.Client,
 		IdleConnTimeout:     openAIWSProxyTransportIdleConnTimeout,
 		TLSHandshakeTimeout: 10 * time.Second,
 		ForceAttemptHTTP2:   true,
-		// Each proxy owns its cache, so tickets never move between exits.
-		// New WS connections still perform their own HTTP authorization.
-		TLSClientConfig: &tls.Config{
-			ClientSessionCache: tls.NewLRUClientSessionCache(openAIWSTLSSessionCacheSize),
-		},
 	}
 	if err := proxyutil.ConfigureTransportProxy(transport, parsedProxyURL); err != nil {
 		return nil, errors.New("invalid websocket proxy transport")
