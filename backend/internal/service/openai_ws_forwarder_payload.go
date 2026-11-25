@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -263,7 +262,6 @@ func (s *OpenAIGatewayService) detachOpenAIWSReadableProviderHeaders(ctx context
 // 必须先于 applyStagedCodexFingerprintClientMetadata 调用，否则拿到的永远是 nil。
 func stageWSFingerprintIDs(c *gin.Context, account *Account, reqBody map[string]any) {
 	if c == nil || account == nil || !account.UsesOpenAICodexProtocol() {
-		slog.Warn("ws_fp_probe", "reason", "guard", "c_nil", c == nil, "acct_nil", account == nil)
 		stageCodexFingerprintIDs(c, nil)
 		return
 	}
