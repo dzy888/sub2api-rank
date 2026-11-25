@@ -2079,6 +2079,7 @@
         </div>
         <OpenAIProxySettings v-if="openaiProxySupported"
           v-model:mode="openaiProxyMode" v-model:session-affinity="openaiProxySessionAffinity"
+          v-model:session-max-concurrency="openaiSessionMaxConcurrency"
           v-model:single-proxy-id="form.proxy_id" v-model:proxy-ids="openaiProxyIds"
           :proxies="proxies" :loading="proxiesLoading" :load-error="proxiesLoadError" :current-account-id="editingAccount.id"
           :user-id="authStore.user?.id" @retry="emit('retry-proxies')" />
@@ -4756,6 +4757,7 @@ const excelBPSProxySource = ref<'mihomo' | 'ip_pool'>('mihomo')
 const openaiProxyMode = ref<'single' | 'request'>('single')
 const openaiProxyIds = ref<number[]>([])
 const openaiProxySessionAffinity = ref(false)
+const openaiSessionMaxConcurrency = ref<number | null>(null)
 const excelBPSCacheCreationAsInput = ref(false)
 const excelBPSAutoDisableOn403 = ref(false)
 const excelBPSAutoRecoverOn403 = ref(false)
@@ -5373,6 +5375,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   excelBPSProxySource.value = 'mihomo'
   openaiProxyMode.value = 'single'
   openaiProxySessionAffinity.value = false
+  openaiSessionMaxConcurrency.value = null
   openaiProxyIds.value = []
   excelBPSCacheCreationAsInput.value = false
   excelBPSAutoDisableOn403.value = false
@@ -5435,6 +5438,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     const hasUnifiedProxyMode = Object.prototype.hasOwnProperty.call(extra ?? {}, 'openai_proxy_mode')
     openaiProxyMode.value = (hasUnifiedProxyMode ? extra?.openai_proxy_mode : extra?.openai_excel_bps_proxy_mode) === 'request' ? 'request' : 'single'
     openaiProxySessionAffinity.value = extra?.openai_request_proxy_session_affinity === true
+    const limit = extra?.openai_session_max_concurrency
+    openaiSessionMaxConcurrency.value = typeof limit === 'number' && limit > 0 ? limit : null
     const configuredProxyIds = hasUnifiedProxyMode ? extra?.openai_proxy_ids : extra?.openai_excel_bps_proxy_ids
     openaiProxyIds.value = Array.isArray(configuredProxyIds)
       ? [...new Set(configuredProxyIds.filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0))]
@@ -7234,6 +7239,12 @@ const handleSubmit = async () => {
           newExtra.openai_request_proxy_session_affinity = true
         } else {
           delete newExtra.openai_request_proxy_session_affinity
+        delete newExtra.openai_session_max_concurrency
+        }
+        if (openaiProxyMode.value === 'request' && openaiSessionMaxConcurrency.value) {
+          newExtra.openai_session_max_concurrency = openaiSessionMaxConcurrency.value
+        } else {
+          delete newExtra.openai_session_max_concurrency
         }
       } else {
         delete newExtra.openai_proxy_mode

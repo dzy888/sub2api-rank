@@ -29,6 +29,17 @@
         <span class="mt-0.5 block text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.proxySessionAffinityHint') }}</span>
       </span>
     </label>
+    <div v-if="mode === 'request'" class="flex items-center justify-between gap-4">
+      <div class="min-w-0">
+        <label class="input-label mb-0">{{ t('admin.accounts.openai.proxySessionMaxConcurrency') }}</label>
+        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.proxySessionMaxConcurrencyHint') }}</p>
+      </div>
+      <div class="w-32 flex-shrink-0">
+        <input v-model.number="sessionMaxConcurrency" data-testid="openai-proxy-session-max-concurrency"
+          type="number" min="0" step="1" class="input" :placeholder="t('admin.accounts.openai.proxySessionMaxConcurrencyOff')"
+          @input="emit('update:sessionMaxConcurrency', normalizeLimit(($event.target as HTMLInputElement).value))" />
+      </div>
+    </div>
     <BPSProxyRoutingSettings v-if="mode === 'request'" mode="request" embedded :proxy-ids="proxyIds" :proxies="proxies"
       :loading="loading" :load-error="loadError" :current-account-id="currentAccountId" :user-id="userId"
       @update:proxy-ids="emit('update:proxyIds', $event)" @retry="emit('retry')" />
@@ -47,6 +58,7 @@ import { NEW_FEATURE_NOTICES } from '@/constants/newFeatureNotices'
 defineProps<{
   mode: 'single' | 'request'
   sessionAffinity?: boolean
+  sessionMaxConcurrency?: number | null
   singleProxyId: number | null
   proxyIds: number[]
   proxies: Proxy[]
@@ -58,10 +70,16 @@ defineProps<{
 const emit = defineEmits<{
   'update:mode': [value: 'single' | 'request']
   'update:sessionAffinity': [value: boolean]
+  'update:sessionMaxConcurrency': [value: number | null]
   'update:singleProxyId': [value: number | null]
   'update:proxyIds': [value: number[]]
   retry: []
 }>()
 const { t } = useI18n()
+// 0 / 空表示不限；后端把非正数当不限，这里统一收敛成 null 便于回显。
+const normalizeLimit = (raw: string): number | null => {
+  const value = Number.parseInt(raw, 10)
+  return Number.isFinite(value) && value > 0 ? value : null
+}
 const modeName = useId()
 </script>

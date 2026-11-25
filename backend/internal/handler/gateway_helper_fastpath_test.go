@@ -36,6 +36,16 @@ func (m *concurrencyCacheMock) GetAccountConcurrency(ctx context.Context, accoun
 	return 0, nil
 }
 
+func (m *concurrencyCacheMock) AcquireSessionSlot(ctx context.Context, accountID int64, _ string, _ int, _ string) (bool, error) {
+	return true, nil
+}
+
+func (m *concurrencyCacheMock) ReleaseSessionSlot(context.Context, int64, string, string) error { return nil }
+
+func (m *concurrencyCacheMock) GetSessionConcurrency(context.Context, int64, string) (int, error) {
+	return 0, nil
+}
+
 func (m *concurrencyCacheMock) GetAccountConcurrencyBatch(ctx context.Context, accountIDs []int64) (map[int64]int, error) {
 	result := make(map[int64]int, len(accountIDs))
 	for _, accountID := range accountIDs {

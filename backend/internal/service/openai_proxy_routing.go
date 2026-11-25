@@ -13,8 +13,12 @@ const (
 	OpenAIProxyModeKey            = "openai_proxy_mode"
 	OpenAIProxyIDsKey             = "openai_proxy_ids"
 	OpenAIProxySessionAffinityKey = "openai_request_proxy_session_affinity"
-	OpenAIProxyModeSingle         = "single"
-	OpenAIProxyModeRequest        = "request"
+	// OpenAISessionMaxConcurrencyKey 限制单个会话在该账号上的并发。0/缺省为不限。
+	// 上游对同一 session 有路由级并发配额（route_rate_limit_exceeded，实测约 26），
+	// 收敛成少量会话后必须靠它把并发压在配额内，否则会触发重试退避。
+	OpenAISessionMaxConcurrencyKey = "openai_session_max_concurrency"
+	OpenAIProxyModeSingle          = "single"
+	OpenAIProxyModeRequest         = "request"
 )
 
 func (a *Account) supportsOpenAIRequestProxies() bool {
@@ -60,6 +64,28 @@ func (a *Account) OpenAIRequestProxyEnabled() bool {
 // Keeping one rule for any exit count also means an account configured with one
 // exit behaves identically to a multi-exit account pinned to one, and measured
 // traffic stays on one IP either way.
+// OpenAISessionMaxConcurrency 返回单会话并发上限，0 表示不限。
+func (a *Account) OpenAISessionMaxConcurrency() int {
+	if a == nil {
+		return 0
+	}
+	switch raw := a.Extra[OpenAISessionMaxConcurrencyKey].(type) {
+	case int:
+		if raw > 0 {
+			return raw
+		}
+	case int64:
+		if raw > 0 {
+			return int(raw)
+		}
+	case float64:
+		if raw > 0 {
+			return int(raw)
+		}
+	}
+	return 0
+}
+
 func (a *Account) OpenAIRequestProxySessionAffinityEnabled() bool {
 	if a == nil || !a.OpenAIRequestProxyEnabled() {
 		return false
@@ -97,6 +123,28 @@ func (s *adminServiceImpl) validateOpenAIProxySettingsChange(ctx context.Context
 	rawMode, supplied := account.Extra[OpenAIProxyModeKey]
 	if supplied && rawMode != OpenAIProxyModeSingle && rawMode != OpenAIProxyModeRequest {
 		return infraerrors.BadRequest("INVALID_OPENAI_PROXY_MODE", "OpenAI proxy mode must be single or request")
+	}
+	if raw, exists := account.Extra[OpenAISessionMaxConcurrencyKey]; exists {
+		switch value := raw.(type) {
+		case int:
+			if value < 0 {
+				return infraerrors.BadRequest("INVALID_OPENAI_SESSION_MAX_CONCURRENCY", "session concurrency cap must not be negative")
+			}
+		case int64:
+			if value < 0 {
+				return infraerrors.BadRequest("INVALID_OPENAI_SESSION_MAX_CONCURRENCY", "session concurrency cap must not be negative")
+			}
+		case float64:
+			if value < 0 || value != float64(int(value)) {
+				return infraerrors.BadRequest("INVALID_OPENAI_SESSION_MAX_CONCURRENCY", "session concurrency cap must be a whole, non-negative number")
+			}
+		default:
+			return infraerrors.BadRequest("INVALID_OPENAI_SESSION_MAX_CONCURRENCY", "session concurrency cap must be a number")
+		}
+		if !account.supportsOpenAIRequestProxies() || account.OpenAIProxyMode() != OpenAIProxyModeRequest {
+			return infraerrors.BadRequest("OPENAI_SESSION_MAX_CONCURRENCY_REQUIRES_REQUEST_MODE",
+				"session concurrency cap requires request proxy mode")
+		}
 	}
 	ids, valid := parseExcelBPSProxyIDs(account.Extra[OpenAIProxyIDsKey])
 	if !valid {

@@ -58,6 +58,18 @@ func (s *helperConcurrencyCacheStub) GetAccountConcurrency(ctx context.Context, 
 	return 0, nil
 }
 
+func (s *helperConcurrencyCacheStub) AcquireSessionSlot(context.Context, int64, string, int, string) (bool, error) {
+	return true, nil
+}
+
+func (s *helperConcurrencyCacheStub) ReleaseSessionSlot(context.Context, int64, string, string) error {
+	return nil
+}
+
+func (s *helperConcurrencyCacheStub) GetSessionConcurrency(context.Context, int64, string) (int, error) {
+	return 0, nil
+}
+
 func (s *helperConcurrencyCacheStub) GetAccountConcurrencyBatch(ctx context.Context, accountIDs []int64) (map[int64]int, error) {
 	out := make(map[int64]int, len(accountIDs))
 	for _, accountID := range accountIDs {

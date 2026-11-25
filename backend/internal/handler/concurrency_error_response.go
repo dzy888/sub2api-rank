@@ -68,6 +68,7 @@ func openAIWSQueueAuthRejectedClose(cause error, wrapper error) *service.OpenAIW
 const (
 	gatewayQueueFullCode        = "gateway_queue_full"
 	gatewayConcurrencyLimitCode = "gateway_concurrency_limit"
+	gatewaySessionLimitCode     = "gateway_session_concurrency_limit"
 	apiKeyQueueFullCode         = "api_key_queue_full"
 	apiKeyQueueTimeoutCode      = "api_key_queue_timeout"
 )
@@ -138,7 +139,11 @@ func concurrencyErrorResponse(err error, slotType string) (int, string, string, 
 		if concurrencyErr.SlotType != "" {
 			slotType = concurrencyErr.SlotType
 		}
-		return http.StatusTooManyRequests, "rate_limit_error", gatewayConcurrencyLimitCode,
+		code := gatewayConcurrencyLimitCode
+		if slotType == "session" {
+			code = gatewaySessionLimitCode
+		}
+		return http.StatusTooManyRequests, "rate_limit_error", code,
 			fmt.Sprintf("Concurrency limit exceeded for %s, please retry later", slotType)
 	}
 

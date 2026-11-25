@@ -3029,7 +3029,58 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, groupID, sessionHash, account.ID); err != nil {
 		reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 	}
-	return wrapReleaseOnDone(ctx, accountReleaseFunc), openAISlotAcquireOK
+	// 会话级并发闸门：上游按 session 计 route_rate_limit_exceeded（实测约 26），
+	// 收敛成少量会话后必须把单会话并发压在配额内。账号槽位先拿，再排会话槽位，
+	// 排队请求不会额外占用别的会话额度。
+	sessionRelease, sessionErr := h.acquireOpenAISessionSlot(c, account, sessionHash, reqStream, streamStarted, reqLog, writeError)
+	if sessionErr != nil {
+		if accountReleaseFunc != nil {
+			accountReleaseFunc()
+		}
+		return nil, openAISlotAcquireFailed
+	}
+	release := accountReleaseFunc
+	if sessionRelease != nil {
+		release = sync.OnceFunc(func() {
+			sessionRelease()
+			accountReleaseFunc()
+		})
+	}
+	return wrapReleaseOnDone(ctx, release), openAISlotAcquireOK
+}
+
+// acquireOpenAISessionSlot 在配置了单会话上限时排队获取会话槽位。
+// 未配置、无会话身份或非请求代理账号时返回 (nil, nil)，调用方沿用账号槽位。
+func (h *OpenAIGatewayHandler) acquireOpenAISessionSlot(c *gin.Context, account *service.Account, sessionHash string, isStream bool, streamStarted *bool, reqLog *zap.Logger, writeError openAISlotErrorWriter) (func(), error) {
+	if account == nil || !account.OpenAIRequestProxyEnabled() {
+		return nil, nil
+	}
+	limit := account.OpenAISessionMaxConcurrency()
+	if limit <= 0 || strings.TrimSpace(sessionHash) == "" {
+		return nil, nil
+	}
+	release, err := h.concurrencyHelper.AcquireSessionSlotWithWaitTimeout(
+		c, account.ID, sessionHash, limit, h.openAISessionWaitTimeout(), isStream, streamStarted,
+	)
+	if err != nil {
+		var concurrencyErr *ConcurrencyError
+		status, errType, code, message := concurrencyErrorResponse(err, "session")
+		if errors.As(err, &concurrencyErr) && concurrencyErr.IsTimeout {
+			reqLog.Warn("openai.session_slot_acquire_timeout",
+				zap.Int64("account_id", account.ID), zap.Int("limit", limit))
+		}
+		writeError(status, errType, code, message)
+		return nil, err
+	}
+	return release, nil
+}
+
+// openAISessionWaitTimeout 复用调度配置的会话排队超时，缺省 120s。
+func (h *OpenAIGatewayHandler) openAISessionWaitTimeout() time.Duration {
+	if h.cfg != nil && h.cfg.Gateway.Scheduling.StickySessionWaitTimeout > 0 {
+		return h.cfg.Gateway.Scheduling.StickySessionWaitTimeout
+	}
+	return 120 * time.Second
 }
 
 // ResponsesWebSocket handles OpenAI Responses API WebSocket ingress endpoint

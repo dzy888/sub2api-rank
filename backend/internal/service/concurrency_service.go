@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,6 +30,7 @@ type ConcurrencyCache interface {
 	GetAccountConcurrency(ctx context.Context, accountID int64) (int, error)
 	GetAccountConcurrencyBatch(ctx context.Context, accountIDs []int64) (map[int64]int, error)
 
+	// 会话槽位管理见 SessionConcurrencyCache：不放进主接口，既有缓存桩无需全部实现。
 	// 账号等待队列（账号级）
 	IncrementAccountWaitCount(ctx context.Context, accountID int64, maxWait int) (bool, error)
 	DecrementAccountWaitCount(ctx context.Context, accountID int64) error
@@ -228,6 +230,16 @@ const (
 	apiKeySlotTrackTimeout          = 2 * time.Second
 )
 
+// SessionConcurrencyCache 是「账号 + 会话」维度的可选槽位能力。
+// 上游按 session 计路由级并发配额（route_rate_limit_exceeded，实测约 26），
+// 收敛成少量会话后必须按会话限额。未实现该接口的缓存退化为不限。
+// 键格式: concurrency:session:{accountID}:{scope}（有序集合，成员为 requestID）
+type SessionConcurrencyCache interface {
+	AcquireSessionSlot(ctx context.Context, accountID int64, scope string, maxConcurrency int, requestID string) (bool, error)
+	ReleaseSessionSlot(ctx context.Context, accountID int64, scope, requestID string) error
+	GetSessionConcurrency(ctx context.Context, accountID int64, scope string) (int, error)
+}
+
 // ConcurrencyService 管理账号和用户的并发限制。
 type ConcurrencyService struct {
 	cache             ConcurrencyCache
@@ -413,6 +425,37 @@ func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID i
 		Acquired:    false,
 		ReleaseFunc: nil,
 	}, nil
+}
+
+// AcquireSessionSlot 获取某个会话在一个账号上的槽位。
+// 与账号槽位相同的 TTL/清理语义，只是键多了一维 scope。
+func (s *ConcurrencyService) AcquireSessionSlot(ctx context.Context, accountID int64, scope string, maxConcurrency int) (*AcquireResult, error) {
+	if maxConcurrency <= 0 || accountID <= 0 || strings.TrimSpace(scope) == "" {
+		return &AcquireResult{Acquired: true, ReleaseFunc: func() {}}, nil
+	}
+	sessionCache, ok := s.cache.(SessionConcurrencyCache)
+	if !ok {
+		return &AcquireResult{Acquired: true, ReleaseFunc: func() {}}, nil
+	}
+	requestID := generateRequestID()
+	acquired, err := sessionCache.AcquireSessionSlot(ctx, accountID, scope, maxConcurrency, requestID)
+	if err != nil {
+		return nil, err
+	}
+	if acquired {
+		return &AcquireResult{
+			Acquired:  true,
+			RequestID: requestID,
+			ReleaseFunc: func() {
+				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := sessionCache.ReleaseSessionSlot(bgCtx, accountID, scope, requestID); err != nil {
+					logger.LegacyPrintf("service.concurrency", "Warning: failed to release session slot for %d/%s (req=%s): %v", accountID, scope, requestID, err)
+				}
+			},
+		}, nil
+	}
+	return &AcquireResult{Acquired: false}, nil
 }
 
 // AcquireUserSlot attempts to acquire a concurrency slot for a user.

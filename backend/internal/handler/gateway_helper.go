@@ -512,18 +512,30 @@ func (h *ConcurrencyHelper) waitForSlotWithPing(c *gin.Context, slotType string,
 
 // waitForSlotWithPingTimeout waits for a concurrency slot with a custom timeout.
 func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType string, id int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool, tryImmediate bool) (func(), error) {
+	return h.waitForSlotWithPingAcquire(c, slotType, maxConcurrency, timeout, isStream, streamStarted, tryImmediate,
+		func(ctx context.Context) (*service.AcquireResult, error) {
+			if slotType == "user" {
+				return h.concurrencyService.AcquireUserSlot(ctx, id, maxConcurrency)
+			}
+			return h.concurrencyService.AcquireAccountSlot(ctx, id, maxConcurrency)
+		})
+}
+
+// AcquireSessionSlotWithWaitTimeout 获取「账号 + 会话」维度的槽位，超时前按退避重试。
+// 命中上限时保持排队而不是直接报错，行为与账号槽位一致。
+func (h *ConcurrencyHelper) AcquireSessionSlotWithWaitTimeout(c *gin.Context, accountID int64, scope string, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
+	return h.waitForSlotWithPingAcquire(c, "session", maxConcurrency, timeout, isStream, streamStarted, true,
+		func(ctx context.Context) (*service.AcquireResult, error) {
+			return h.concurrencyService.AcquireSessionSlot(ctx, accountID, scope, maxConcurrency)
+		})
+}
+
+func (h *ConcurrencyHelper) waitForSlotWithPingAcquire(c *gin.Context, slotType string, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool, tryImmediate bool, acquireSlot func(context.Context) (*service.AcquireResult, error)) (func(), error) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 	defer cancel()
 
-	acquireSlot := func() (*service.AcquireResult, error) {
-		if slotType == "user" {
-			return h.concurrencyService.AcquireUserSlot(ctx, id, maxConcurrency)
-		}
-		return h.concurrencyService.AcquireAccountSlot(ctx, id, maxConcurrency)
-	}
-
 	if tryImmediate {
-		result, err := acquireSlot()
+		result, err := acquireSlot(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -585,7 +597,7 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 
 		case <-timer.C:
 			// Try to acquire slot
-			result, err := acquireSlot()
+			result, err := acquireSlot(ctx)
 			if err != nil {
 				return nil, err
 			}

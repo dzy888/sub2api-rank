@@ -272,3 +272,55 @@ func TestAdminOpenAIProxyBulkCredentialChangeCannotBypassEligibility(t *testing.
 	_, err := svc.BulkUpdateAccounts(context.Background(), &BulkUpdateAccountsInput{AccountIDs: []int64{1}, Credentials: map[string]any{"auth_mode": "personalAccessToken"}})
 	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
 }
+
+func TestAccountSessionMaxConcurrencyParsing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  any
+		want int
+	}{
+		{"absent", nil, 0},
+		{"int", 12, 12},
+		{"int64", int64(7), 7},
+		{"float64 from json", float64(9), 9},
+		{"zero", 0, 0},
+		{"negative", -3, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{}}
+			if tc.raw != nil {
+				account.Extra[OpenAISessionMaxConcurrencyKey] = tc.raw
+			}
+			require.Equal(t, tc.want, account.OpenAISessionMaxConcurrency())
+		})
+	}
+}
+
+func TestAdminSessionMaxConcurrencyValidation(t *testing.T) {
+	svc, repo := newBPSProxyConfigService()
+	repo.account = &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{
+		OpenAIProxyModeKey: OpenAIProxyModeRequest, OpenAIProxyIDsKey: []int64{11},
+	}}
+
+	_, err := svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{Extra: map[string]any{
+		OpenAISessionMaxConcurrencyKey: 12,
+	}})
+	require.NoError(t, err)
+	require.Equal(t, 12, repo.account.OpenAISessionMaxConcurrency())
+
+	for _, bad := range []any{-1, "12", 1.5} {
+		_, err = svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{Extra: map[string]any{
+			OpenAISessionMaxConcurrencyKey: bad,
+		}})
+		require.Equal(t, http.StatusBadRequest, infraerrors.Code(err), "%v", bad)
+	}
+
+	// single 模式没有请求级会话，拒绝该键以免静默失效。
+	repo.account = &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{
+		OpenAIProxyModeKey: OpenAIProxyModeSingle, OpenAIProxyIDsKey: []int64{11},
+	}}
+	_, err = svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{Extra: map[string]any{
+		OpenAISessionMaxConcurrencyKey: 12,
+	}})
+	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+}

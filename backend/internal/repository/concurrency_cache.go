@@ -26,7 +26,9 @@ import (
 const (
 	// 并发槽位键前缀（有序集合）
 	// 格式: concurrency:account:{accountID}
-	accountSlotKeyPrefix = "concurrency:account:"
+	accountSlotKeyPrefix     = "concurrency:account:"
+	sessionSlotKeyPrefix     = "concurrency:session:"
+	liveSessionSlotKeyPrefix = "concurrency:live:session:"
 	// 格式: concurrency:user:{userID}
 	userSlotKeyPrefix = "concurrency:user:"
 	// 格式: concurrency:api_key:{apiKeyID}
@@ -883,6 +885,39 @@ func (c *concurrencyCache) ReleaseAccountSlot(ctx context.Context, accountID int
 	// 释放后用真实负载刷新索引；若没有槽位和等待计数，会移除索引 member。
 	c.refreshAccountActiveIndex(ctx, accountID)
 	return nil
+}
+
+func sessionSlotKey(accountID int64, scope string) string {
+	return fmt.Sprintf("%s%d:%s", sessionSlotKeyPrefix, accountID, scope)
+}
+
+func liveSessionSlotKey(accountID int64, scope string) string {
+	return fmt.Sprintf("%s%d:%s", liveSessionSlotKeyPrefix, accountID, scope)
+}
+
+// AcquireSessionSlot 在同一账号的会话维度上占槽，用于把单会话并发压在上游
+// 单会话路由配额之内。脚本与账号槽位共用，仅键不同。
+func (c *concurrencyCache) AcquireSessionSlot(ctx context.Context, accountID int64, scope string, maxConcurrency int, requestID string) (bool, error) {
+	result, _, err := runScriptInt64Pair(ctx, c.rdb, acquireScript,
+		[]string{sessionSlotKey(accountID, scope), liveSessionSlotKey(accountID, scope)},
+		maxConcurrency, c.slotTTLSeconds, requestID)
+	if err != nil {
+		return false, err
+	}
+	return result == 1, nil
+}
+
+func (c *concurrencyCache) ReleaseSessionSlot(ctx context.Context, accountID int64, scope, requestID string) error {
+	return c.rdb.ZRem(ctx, sessionSlotKey(accountID, scope), requestID).Err()
+}
+
+func (c *concurrencyCache) GetSessionConcurrency(ctx context.Context, accountID int64, scope string) (int, error) {
+	result, err := getCountScript.Run(ctx, c.rdb,
+		[]string{sessionSlotKey(accountID, scope), liveSessionSlotKey(accountID, scope)}, c.slotTTLSeconds).Int()
+	if err != nil {
+		return 0, err
+	}
+	return result, nil
 }
 
 func (c *concurrencyCache) GetAccountConcurrency(ctx context.Context, accountID int64) (int, error) {
