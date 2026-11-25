@@ -302,6 +302,9 @@ type codexFingerprintIDs struct {
 	turnStartedAtUnixMs           int64
 	originalBodySessionID         string
 	originalBodySessionIDCaptured bool
+	// messagesBridge 记录客户端原始 prompt_cache_key 是否属于 anthropic-* 兼容入口。
+	// transform 会先删掉该字段，事后无法再判定，只能在解析阶段记下来。
+	messagesBridge bool
 	// subagent 模式专用：本会话的根线程与派生形态。
 	parentThreadID string
 	subagentKind   string
@@ -505,6 +508,10 @@ func resolveCodexFingerprintIDsFromRequestWithBody(account *Account, clientHeade
 	if ids != nil {
 		ids.windowNumber = resolveCodexWindowNumber(clientHeaders, body)
 		ids.windowID = codexWindowID(ids.threadID, ids.windowNumber)
+		if len(body) > 0 {
+			ids.messagesBridge = isOpenAICompatMessagesBridgePromptCacheKey(
+				gjson.GetBytes(body, "prompt_cache_key").String())
+		}
 	}
 	return ids
 }
@@ -731,11 +738,23 @@ func shouldRewriteCodexFingerprintPromptCacheKey(ids *codexFingerprintIDs, promp
 }
 
 func applyCodexFingerprintPromptCacheKey(reqBody map[string]any, ids *codexFingerprintIDs) bool {
-	if reqBody == nil {
+	if reqBody == nil || ids == nil || ids.sessionID == "" {
 		return false
 	}
+	// messages bridge（Claude Code 兼容入口）的 prompt_cache_key 是 anthropic-*
+	// 专用命名空间，上游不接受也由 bridge 自行维护，这里不补也不改。
+	if ids.messagesBridge || isOpenAICompatMessagesBridgeRequestBody(reqBody) {
+		return false
+	}
+	// 字段完全缺失时补上：Codex 的 PromptCacheKey::SessionDerived 恒发该字段且值
+	// 就是 session（client.rs prompt_cache_key / session_derived_cache_key），
+	// 缺席本身就是一处可见差异。客户端显式写过的值（含空串）保持既有语义。
+	if _, exists := reqBody["prompt_cache_key"]; !exists {
+		reqBody["prompt_cache_key"] = ids.sessionID
+		return true
+	}
 	promptCacheKey, ok := reqBody["prompt_cache_key"].(string)
-	if !ok || strings.TrimSpace(promptCacheKey) == "" || !shouldRewriteCodexFingerprintPromptCacheKey(ids, promptCacheKey) {
+	if !ok || !shouldRewriteCodexFingerprintPromptCacheKey(ids, promptCacheKey) {
 		return false
 	}
 	if promptCacheKey == ids.sessionID {
@@ -789,7 +808,11 @@ func applyCodexFingerprintClientMetadataRaw(body []byte, ids *codexFingerprintID
 		modified = true
 	}
 	promptCacheKey := gjson.GetBytes(body, "prompt_cache_key")
-	if promptCacheKey.Exists() && promptCacheKey.Type == gjson.String && strings.TrimSpace(promptCacheKey.String()) != "" && shouldRewriteCodexFingerprintPromptCacheKey(ids, promptCacheKey.String()) {
+	injectKey := !promptCacheKey.Exists() && ids.sessionID != ""
+	rewriteKey := promptCacheKey.Exists() && promptCacheKey.Type == gjson.String &&
+		strings.TrimSpace(promptCacheKey.String()) != "" &&
+		shouldRewriteCodexFingerprintPromptCacheKey(ids, promptCacheKey.String())
+	if injectKey || rewriteKey {
 		rewritten, err := sjson.SetBytes(next, "prompt_cache_key", ids.sessionID)
 		if err != nil {
 			return body, false, fmt.Errorf("splice converged prompt_cache_key: %w", err)
@@ -803,13 +826,21 @@ func applyCodexFingerprintClientMetadataRaw(body []byte, ids *codexFingerprintID
 // rewriteClientMetadataEmbeddedTurnMetadata 改写 client_metadata 中内嵌的
 // x-codex-turn-metadata JSON 字符串里的指定字段。非法/非对象值会重建，
 // 避免 flat client_metadata 与 embedded metadata 暴露两套身份。
+//
+// 键不存在时同样重建：Codex 只要 request_kind 存在就必发这个嵌套键
+// （responses_metadata.rs has_turn_metadata / client_metadata:392-396），
+// 而本网关恒写 request_kind=turn，缺了它就是明显的客户端形态差异。
 func rewriteClientMetadataEmbeddedTurnMetadata(clientMetadata map[string]any, fields map[string]any) {
-	raw, ok := clientMetadata["x-codex-turn-metadata"].(string)
-	if !ok || raw == "" {
+	if clientMetadata == nil {
 		return
 	}
 	var metadata map[string]any
-	if err := json.Unmarshal([]byte(raw), &metadata); err != nil || metadata == nil {
+	if raw, ok := clientMetadata["x-codex-turn-metadata"].(string); ok && raw != "" {
+		if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+			metadata = nil
+		}
+	}
+	if metadata == nil {
 		metadata = make(map[string]any, len(fields))
 	}
 	for k, v := range fields {
