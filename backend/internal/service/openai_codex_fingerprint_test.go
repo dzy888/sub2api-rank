@@ -965,12 +965,19 @@ func TestResolveCodexFingerprintIDs_SubagentMode(t *testing.T) {
 	require.Equal(t, a.parentThreadID, c.parentThreadID)
 	require.NotEqual(t, a.threadID, c.threadID, "不同客户端会话是不同的子代理线程")
 
-	// 无客户端身份（网关自行合成的并发）→ 每次一个新子线程，同会话同父线程。
-	d := resolveCodexFingerprintIDsFromRequest(account, headers(""))
-	e := resolveCodexFingerprintIDsFromRequest(account, headers(""))
-	require.Equal(t, a.sessionID, d.sessionID)
-	require.Equal(t, a.parentThreadID, d.parentThreadID)
-	require.NotEqual(t, d.threadID, e.threadID, "无身份时必须各自成线程，不能并发撞同一线程")
+	// 无客户端身份（网关自行合成的并发）→ 摊到固定的子线程集合上，
+	// 数量不超过真实 Codex 的单会话上限，否则会话下线程数会失控。
+	seen := map[string]bool{}
+	seenSession := map[string]bool{}
+	for i := 0; i < 40; i++ {
+		ids := resolveCodexFingerprintIDsFromRequest(account, headers(""))
+		seen[ids.threadID] = true
+		seenSession[ids.sessionID] = true
+	}
+	require.Len(t, seenSession, 1, "所有并发仍属同一会话")
+	require.LessOrEqual(t, len(seen), codexSubagentThreadsPerSession,
+		"单会话线程数不得超过真实客户端上限")
+	require.Greater(t, len(seen), 1, "无身份时不能全部挤在单一线程上")
 }
 
 func TestApplyCodexFingerprintHeaders_SubagentMode(t *testing.T) {

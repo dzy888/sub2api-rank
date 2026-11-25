@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -89,8 +90,12 @@ const (
 )
 
 const (
-	codexFingerprintModeExtraKey = "codex_fingerprint_mode"
-	codexFingerprintSeedExtraKey = "codex_fingerprint_seed"
+	// codexSubagentThreadsPerSession 对齐真实 Codex 的单会话子代理并发上限：
+	// codex-rs 的 DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION = 4
+	// （旧版 agent_max_threads = 6）。会话下超过这个数量的并发线程是异常特征。
+	codexSubagentThreadsPerSession = 4
+	codexFingerprintModeExtraKey   = "codex_fingerprint_mode"
+	codexFingerprintSeedExtraKey   = "codex_fingerprint_seed"
 )
 
 func canonicalCodexFingerprintSeed(value any) (string, bool) {
@@ -339,7 +344,7 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 	case codexFingerprintSubagent:
 		ids.sessionID = resolveConvergedSessionID(seed)
 		ids.parentThreadID = resolveConvergedRootThreadID(seed)
-		ids.threadID = resolveConvergedSubagentThreadID(seed, clientSessionID)
+		ids.threadID = resolveConvergedSubagentThreadIDForSlot(seed, clientSessionID, nextCodexSubagentSlot())
 		ids.turnID = uuid.Must(uuid.NewV7()).String()
 		ids.windowID = codexWindowID(ids.threadID, ids.windowNumber)
 		ids.subagentKind = openAICodexSubagentKindThreadSpawn
@@ -397,18 +402,36 @@ func resolveConvergedRootThreadID(seed string) string {
 
 // resolveConvergedSubagentThreadID 为每个客户端会话派生一个子线程。
 //
-// 有客户端身份时确定性派生，同一会话的后续 turn 落在同一线程；没有身份时
-// （例如网关自行合成的并发请求）每个请求生成一个新线程，于是几十个并发请求
-// 呈现为同一会话里并行 spawn 的多个子代理，而不是同一线程上的并发 turn——
-// 后者在真实 Codex 里几乎不会出现。
+// 有客户端身份时确定性派生，同一会话的后续 turn 落在同一线程。
+//
+// 没有身份时（网关自行合成的并发请求）不能用「每个请求一个新线程」：真实 Codex
+// 一个会话同时最多只有 codexSubagentThreadsPerSession 个线程（V2 默认 4，旧版 6，
+// 见 codex-rs DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION），
+// 会话下冒出几十个线程本身就是异常特征。这里把并发请求均匀摊到固定的若干个子线程上，
+// 形状与该上限内正常 spawn 出来的子代理一致。
 func resolveConvergedSubagentThreadID(seed, clientSessionID string) string {
+	return resolveConvergedSubagentThreadIDForSlot(seed, clientSessionID, 0)
+}
+
+// codexSubagentSlot 返回本请求应落在的子线程槽位。
+// 无客户端身份时按进程内计数器轮转，使同一批并发在固定子线程集合上均匀分布，
+// 而不是每个请求各开一个新线程。
+var codexSubagentSlotCounter atomic.Uint64
+
+func nextCodexSubagentSlot() uint64 {
+	return codexSubagentSlotCounter.Add(1) - 1
+}
+
+// resolveConvergedSubagentThreadIDForSlot 与上者相同，但允许调用方指定槽位，
+// 供需要把同批并发摊到固定子线程集合的场景使用。
+func resolveConvergedSubagentThreadIDForSlot(seed, clientSessionID string, slot uint64) string {
 	if seed == "" {
 		return ""
 	}
-	if clientSessionID == "" {
-		return uuid.Must(uuid.NewV7()).String()
+	if clientSessionID != "" {
+		return deriveStableUUIDv4("sub2api:codex-subagent-thread-id:v1:" + seed + ":" + clientSessionID)
 	}
-	return deriveStableUUIDv4("sub2api:codex-subagent-thread-id:v1:" + seed + ":" + clientSessionID)
+	return deriveStableUUIDv4(fmt.Sprintf("sub2api:codex-subagent-thread-slot:v1:%s:%d", seed, slot%codexSubagentThreadsPerSession))
 }
 
 // extractClientSessionID 从请求头中提取客户端原始的会话标识。
