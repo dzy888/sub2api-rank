@@ -95,11 +95,12 @@ func sameAccountRetryAllowed(failoverErr *service.UpstreamFailoverError, retryCo
 		}
 		return retryCount < retryLimit
 	}
-	// OAuth 429 explicitly opts into a deadline window. It is intentionally not
-	// bounded by the ordinary/default pool retry count.
-	if !failoverErr.SameAccountRetryDeadline.IsZero() {
-		return true
-	}
+	// 次数上限与时间窗同时生效：deadline 只提前终止重试，不能取消次数限制。
+	// codex-rs 对 RateLimitExceeded 用 RetryPolicy::Backoff，并由调用方按
+	// DEFAULT_STREAM_MAX_RETRIES = 5 计数（protocol/error.rs retry_policy、
+	// model-provider-info/src/lib.rs:75）；没有任何「有 deadline 就无限重试」的语义。
+	// 早前这里对带 deadline 的错误直接 return true，导致 OAuth 429 在 2 分钟窗口内
+	// 每 3.2s 重试一次、累计三十余次，账号被持续打到 429。
 	return retryLimit > 0 && retryCount < retryLimit
 }
 
