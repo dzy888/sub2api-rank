@@ -277,6 +277,7 @@ func stageWSFingerprintIDs(c *gin.Context, account *Account, reqBody map[string]
 	}
 	body, _ := json.Marshal(reqBody)
 	ids := resolveCodexFingerprintIDsFromRequestWithBody(account, clientHeaders, body)
+	slog.Warn("ws_fp_probe2", "ids_nil", ids == nil, "mode", string(account.GetCodexFingerprintMode()))
 	stageCodexFingerprintIDs(c, ids)
 }
 
