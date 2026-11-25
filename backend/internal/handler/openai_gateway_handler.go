@@ -2912,7 +2912,12 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		return nil, openAISlotAcquireFailed
 	}
 	account := selection.Account
-	if selection.Acquired {
+	// accountRelease 汇总三条成功准入路径（调度器已抢槽 / 快速抢槽 / 排队抢槽）的
+	// 账号槽位释放函数。三条路径都必须再叠一层会话闸门：上游按 session 计量配额，
+	// 只在排队路径挂闸门会让账号有空闲槽时（绝大多数请求）完全绕过单会话上限。
+	var accountRelease func()
+	switch {
+	case selection.Acquired:
 		latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(ctx, account)
 		if vetoed {
 			if selection.ReleaseFunc != nil {
@@ -2933,118 +2938,124 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 				reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			}
 		}
-		return wrapReleaseOnDone(ctx, selection.ReleaseFunc), openAISlotAcquireOK
-	}
-	if selection.WaitPlan == nil {
+		accountRelease = selection.ReleaseFunc
+
+	case selection.WaitPlan == nil:
 		markOpsRoutingCapacityLimited(c)
 		writeError(http.StatusServiceUnavailable, "api_error", "", "No available accounts")
 		return nil, openAISlotAcquireFailed
-	}
 
-	fastReleaseFunc, fastAcquired, err := h.concurrencyHelper.TryAcquireAccountSlot(
-		ctx,
-		account.ID,
-		selection.WaitPlan.MaxConcurrency,
-	)
-	if err != nil {
-		reqLog.Warn("openai.account_slot_quick_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-		status, errType, code, message := concurrencyErrorResponse(err, "account")
-		writeError(status, errType, code, message)
-		return nil, openAISlotAcquireFailed
-	}
-	if fastAcquired {
-		// 分组利润控制：快速抢槽成功后终检。选号与抢槽之间账号
-		// 倍率可能刷新，越线则释放槽位交由调用方排除重选，不绑定粘连。
+	default:
+		fastReleaseFunc, fastAcquired, err := h.concurrencyHelper.TryAcquireAccountSlot(
+			ctx,
+			account.ID,
+			selection.WaitPlan.MaxConcurrency,
+		)
+		if err != nil {
+			reqLog.Warn("openai.account_slot_quick_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+			status, errType, code, message := concurrencyErrorResponse(err, "account")
+			writeError(status, errType, code, message)
+			return nil, openAISlotAcquireFailed
+		}
+		if fastAcquired {
+			// 分组利润控制：快速抢槽成功后终检。选号与抢槽之间账号
+			// 倍率可能刷新，越线则释放槽位交由调用方排除重选，不绑定粘连。
+			latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(ctx, account)
+			if vetoed {
+				if fastReleaseFunc != nil {
+					fastReleaseFunc()
+				}
+				reqLog.Debug("openai.account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
+				return nil, openAISlotAcquireProfitVetoed
+			}
+			account = latest
+			selection.Account = latest
+			if !checkLatency(fastReleaseFunc) {
+				return nil, openAISlotAcquireFailed
+			}
+			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, groupID, sessionHash, account.ID); err != nil {
+				reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+			}
+			accountRelease = fastReleaseFunc
+			break
+		}
+
+		canWait, waitErr := h.concurrencyHelper.IncrementAccountWaitCount(ctx, account.ID, selection.WaitPlan.MaxWaiting)
+		if waitErr != nil {
+			reqLog.Warn("openai.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(waitErr))
+		} else if !canWait {
+			reqLog.Info("openai.account_wait_queue_full",
+				zap.Int64("account_id", account.ID),
+				zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
+			)
+			writeError(http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, "Too many pending requests, please retry later")
+			return nil, openAISlotAcquireFailed
+		}
+
+		accountWaitCounted := waitErr == nil && canWait
+		releaseWait := func() {
+			if accountWaitCounted {
+				h.concurrencyHelper.DecrementAccountWaitCount(ctx, account.ID)
+				accountWaitCounted = false
+			}
+		}
+		defer releaseWait()
+
+		accountReleaseFunc, err := h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
+			c,
+			account.ID,
+			selection.WaitPlan.MaxConcurrency,
+			selection.WaitPlan.Timeout,
+			reqStream,
+			streamStarted,
+		)
+		if err != nil {
+			reqLog.Warn("openai.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+			status, errType, code, message := concurrencyErrorResponse(err, "account")
+			writeError(status, errType, code, message)
+			return nil, openAISlotAcquireFailed
+		}
+
+		// Slot acquired: no longer waiting in queue.
+		releaseWait()
+		// 分组利润控制：WaitPlan 排队成功后终检。排队期间账号倍率
+		// 可能上调，越线则释放槽位交由调用方排除重选，不绑定粘连。
 		latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(ctx, account)
 		if vetoed {
-			if fastReleaseFunc != nil {
-				fastReleaseFunc()
+			if accountReleaseFunc != nil {
+				accountReleaseFunc()
 			}
 			reqLog.Debug("openai.account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
 			return nil, openAISlotAcquireProfitVetoed
 		}
 		account = latest
 		selection.Account = latest
-		if !checkLatency(fastReleaseFunc) {
+		if !checkLatency(accountReleaseFunc) {
 			return nil, openAISlotAcquireFailed
 		}
 		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, groupID, sessionHash, account.ID); err != nil {
 			reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		}
-		return wrapReleaseOnDone(ctx, fastReleaseFunc), openAISlotAcquireOK
+		accountRelease = accountReleaseFunc
 	}
 
-	canWait, waitErr := h.concurrencyHelper.IncrementAccountWaitCount(ctx, account.ID, selection.WaitPlan.MaxWaiting)
-	if waitErr != nil {
-		reqLog.Warn("openai.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(waitErr))
-	} else if !canWait {
-		reqLog.Info("openai.account_wait_queue_full",
-			zap.Int64("account_id", account.ID),
-			zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
-		)
-		writeError(http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, "Too many pending requests, please retry later")
-		return nil, openAISlotAcquireFailed
-	}
-
-	accountWaitCounted := waitErr == nil && canWait
-	releaseWait := func() {
-		if accountWaitCounted {
-			h.concurrencyHelper.DecrementAccountWaitCount(ctx, account.ID)
-			accountWaitCounted = false
-		}
-	}
-	defer releaseWait()
-
-	accountReleaseFunc, err := h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
-		c,
-		account.ID,
-		selection.WaitPlan.MaxConcurrency,
-		selection.WaitPlan.Timeout,
-		reqStream,
-		streamStarted,
-	)
-	if err != nil {
-		reqLog.Warn("openai.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-		status, errType, code, message := concurrencyErrorResponse(err, "account")
-		writeError(status, errType, code, message)
-		return nil, openAISlotAcquireFailed
-	}
-
-	// Slot acquired: no longer waiting in queue.
-	releaseWait()
-	// 分组利润控制：WaitPlan 排队成功后终检。排队期间账号倍率
-	// 可能上调，越线则释放槽位交由调用方排除重选，不绑定粘连。
-	latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(ctx, account)
-	if vetoed {
-		if accountReleaseFunc != nil {
-			accountReleaseFunc()
-		}
-		reqLog.Debug("openai.account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
-		return nil, openAISlotAcquireProfitVetoed
-	}
-	account = latest
-	selection.Account = latest
-	if !checkLatency(accountReleaseFunc) {
-		return nil, openAISlotAcquireFailed
-	}
-	if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, groupID, sessionHash, account.ID); err != nil {
-		reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-	}
-	// 会话级并发闸门：上游按 session 计 route_rate_limit_exceeded（实测约 26），
+	// 会话级并发闸门：上游按 session 计 route_rate_limit_exceeded，
 	// 收敛成少量会话后必须把单会话并发压在配额内。账号槽位先拿，再排会话槽位，
 	// 排队请求不会额外占用别的会话额度。
 	sessionRelease, sessionErr := h.acquireOpenAISessionSlot(c, account, sessionHash, reqStream, streamStarted, reqLog, writeError)
 	if sessionErr != nil {
-		if accountReleaseFunc != nil {
-			accountReleaseFunc()
+		if accountRelease != nil {
+			accountRelease()
 		}
 		return nil, openAISlotAcquireFailed
 	}
-	release := accountReleaseFunc
+	release := accountRelease
 	if sessionRelease != nil {
 		release = sync.OnceFunc(func() {
 			sessionRelease()
-			accountReleaseFunc()
+			if accountRelease != nil {
+				accountRelease()
+			}
 		})
 	}
 	return wrapReleaseOnDone(ctx, release), openAISlotAcquireOK
