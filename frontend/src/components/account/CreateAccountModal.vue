@@ -6326,7 +6326,7 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
     if (openaiProxyMode.value === 'request' && openaiProxySessionAffinity.value) {
       extra.openai_request_proxy_session_affinity = true
     }
-    if (openaiProxyMode.value === 'request' && openaiSessionMaxConcurrency.value) {
+    if (openaiSessionMaxConcurrency.value) {
       extra.openai_session_max_concurrency = openaiSessionMaxConcurrency.value
     }
     extra.openai_oauth_responses_websockets_v2_mode = openaiOAuthResponsesWebSocketV2Mode.value

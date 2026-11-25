@@ -315,12 +315,13 @@ func TestAdminSessionMaxConcurrencyValidation(t *testing.T) {
 		require.Equal(t, http.StatusBadRequest, infraerrors.Code(err), "%v", bad)
 	}
 
-	// single 模式没有请求级会话，拒绝该键以免静默失效。
+	// 单代理与多出口共用同一条上游会话配额，所以 single 模式同样允许配置。
 	repo.account = &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{
 		OpenAIProxyModeKey: OpenAIProxyModeSingle, OpenAIProxyIDsKey: []int64{11},
 	}}
 	_, err = svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{Extra: map[string]any{
 		OpenAISessionMaxConcurrencyKey: 12,
 	}})
-	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+	require.NoError(t, err)
+	require.Equal(t, 12, repo.account.OpenAISessionMaxConcurrency())
 }

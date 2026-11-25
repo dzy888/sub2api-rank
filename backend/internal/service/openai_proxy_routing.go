@@ -141,9 +141,12 @@ func (s *adminServiceImpl) validateOpenAIProxySettingsChange(ctx context.Context
 		default:
 			return infraerrors.BadRequest("INVALID_OPENAI_SESSION_MAX_CONCURRENCY", "session concurrency cap must be a number")
 		}
-		if !account.supportsOpenAIRequestProxies() || account.OpenAIProxyMode() != OpenAIProxyModeRequest {
-			return infraerrors.BadRequest("OPENAI_SESSION_MAX_CONCURRENCY_REQUIRES_REQUEST_MODE",
-				"session concurrency cap requires request proxy mode")
+		// 单会话并发上限与出口选择无关：单代理与多出口账号面对同一条上游
+		// 会话配额，因此只要求该账号支持请求级路由能力（即 OpenAI OAuth），
+		// 不限定 proxy mode。
+		if !account.supportsOpenAIRequestProxies() {
+			return infraerrors.BadRequest("OPENAI_SESSION_MAX_CONCURRENCY_REQUIRES_OAUTH",
+				"session concurrency cap requires an OpenAI OAuth account")
 		}
 	}
 	ids, valid := parseExcelBPSProxyIDs(account.Extra[OpenAIProxyIDsKey])

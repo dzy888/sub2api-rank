@@ -7239,9 +7239,8 @@ const handleSubmit = async () => {
           newExtra.openai_request_proxy_session_affinity = true
         } else {
           delete newExtra.openai_request_proxy_session_affinity
-        delete newExtra.openai_session_max_concurrency
         }
-        if (openaiProxyMode.value === 'request' && openaiSessionMaxConcurrency.value) {
+        if (openaiSessionMaxConcurrency.value) {
           newExtra.openai_session_max_concurrency = openaiSessionMaxConcurrency.value
         } else {
           delete newExtra.openai_session_max_concurrency
@@ -7250,6 +7249,7 @@ const handleSubmit = async () => {
         delete newExtra.openai_proxy_mode
         delete newExtra.openai_proxy_ids
         delete newExtra.openai_request_proxy_session_affinity
+        delete newExtra.openai_session_max_concurrency
       }
       if (newExtra.openai_excel_bps === true && excelBPSCacheCreationAsInput.value) {
         newExtra.openai_excel_bps_cache_creation_as_input = true

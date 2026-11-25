@@ -3050,9 +3050,12 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 }
 
 // acquireOpenAISessionSlot 在配置了单会话上限时排队获取会话槽位。
-// 未配置、无会话身份或非请求代理账号时返回 (nil, nil)，调用方沿用账号槽位。
+// 未配置或没有会话身份时返回 (nil, nil)，调用方沿用账号槽位。
+//
+// 单会话并发上限与出口选择无关：单代理和多出口账号共用同一条上游会话配额，
+// 因此这里不看代理模式，只看账号是否配置了上限。
 func (h *OpenAIGatewayHandler) acquireOpenAISessionSlot(c *gin.Context, account *service.Account, sessionHash string, isStream bool, streamStarted *bool, reqLog *zap.Logger, writeError openAISlotErrorWriter) (func(), error) {
-	if account == nil || !account.OpenAIRequestProxyEnabled() {
+	if account == nil {
 		return nil, nil
 	}
 	limit := account.OpenAISessionMaxConcurrency()

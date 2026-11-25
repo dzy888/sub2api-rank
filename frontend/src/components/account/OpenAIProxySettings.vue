@@ -29,7 +29,7 @@
         <span class="mt-0.5 block text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.proxySessionAffinityHint') }}</span>
       </span>
     </label>
-    <div v-if="mode === 'request'" class="flex items-center justify-between gap-4">
+    <div class="flex items-center justify-between gap-4">
       <div class="min-w-0">
         <label class="input-label mb-0">{{ t('admin.accounts.openai.proxySessionMaxConcurrency') }}</label>
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.proxySessionMaxConcurrencyHint') }}</p>
