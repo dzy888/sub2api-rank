@@ -365,6 +365,7 @@ func (h *OpenAIGatewayHandler) admitOpenAIWSTurnForPricing(
 	apiKey *service.APIKey,
 	account *service.Account,
 	accountConcurrency int,
+	sessionHash string,
 	turn int,
 	reqLog *zap.Logger,
 	turnPricing *openAIWSTurnPricing,
@@ -388,6 +389,35 @@ func (h *OpenAIGatewayHandler) admitOpenAIWSTurnForPricing(
 			userRelease()
 		}
 		return nil, nil, service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "account is busy, please retry later", nil)
+	}
+	// 会话级闸门：与 HTTP 同一套上游会话配额，WS 长连接不能绕过。
+	sessionRelease, sessionAdmitted := h.tryAcquireOpenAISessionSlot(ctx, account, sessionHash)
+	if !sessionAdmitted {
+		if accountRelease != nil {
+			accountRelease()
+		}
+		if userRelease != nil {
+			userRelease()
+		}
+		if reqLog != nil {
+			reqLog.Warn("openai.websocket_turn_session_slot_unavailable",
+				zap.Int("turn", turn),
+				zap.Int64("account_id", account.ID),
+				zap.String("session_hash", sessionHash),
+				zap.Int("limit", account.OpenAISessionMaxConcurrency()),
+			)
+		}
+		return nil, nil, service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "too many concurrent requests for this session, please retry later", nil)
+	}
+	if sessionRelease != nil {
+		if accountRelease != nil {
+			accountRelease = sync.OnceFunc(func() {
+				sessionRelease()
+				accountRelease()
+			})
+		} else {
+			accountRelease = sync.OnceFunc(sessionRelease)
+		}
 	}
 	// 复核既有账务/权限策略；全部准入完成后才冻结本轮定价（计划 6.2.1）：
 	// 排队时间不得按排队前时刻计价，同一逻辑 turn 的换号重试不再进入这里。
@@ -3089,6 +3119,38 @@ func (h *OpenAIGatewayHandler) acquireOpenAISessionSlot(c *gin.Context, account 
 	return release, nil
 }
 
+// tryAcquireOpenAISessionSlot 是 WS 路径的会话闸门：WS 准入没有排队语义
+// （账号槽满即关闭连接），因此只在有空闲会话槽时成功。
+//
+// 返回 (release, admitted)：
+//   - 未配置单会话上限或无会话身份时 (nil, true)——不限流，放行
+//   - 抢到会话槽 (release, true)
+//   - 会话已满 (nil, false)
+//
+// 不能用一个 nil 同时表达「不限」和「已满」，否则 limit=0 的账号会被误判为满。
+//
+// 与 HTTP 路径同一条上游会话配额：账号配置了单会话上限就必须生效，
+// 否则一条 WS 长连接池可以无限展开同一会话的并发 turn。
+func (h *OpenAIGatewayHandler) tryAcquireOpenAISessionSlot(ctx context.Context, account *service.Account, sessionHash string) (func(), bool) {
+	if h == nil || h.concurrencyHelper == nil || h.concurrencyHelper.concurrencyService == nil || account == nil {
+		return nil, true
+	}
+	limit := account.OpenAISessionMaxConcurrency()
+	if limit <= 0 || strings.TrimSpace(sessionHash) == "" {
+		return nil, true
+	}
+	result, err := h.concurrencyHelper.concurrencyService.AcquireSessionSlot(ctx, account.ID, sessionHash, limit)
+	if err != nil || result == nil {
+		// 会话槽位查询失败时按放行处理：会话闸门是保护性限流，
+		// 不应让 Redis 抖动放大成连接失败（账号槽位仍然是硬约束）。
+		return nil, true
+	}
+	if !result.Acquired {
+		return nil, false
+	}
+	return result.ReleaseFunc, true
+}
+
 // openAISessionWaitTimeout 复用调度配置的会话排队超时，缺省 120s。
 func (h *OpenAIGatewayHandler) openAISessionWaitTimeout() time.Duration {
 	if h.cfg != nil && h.cfg.Gateway.Scheduling.StickySessionWaitTimeout > 0 {
@@ -3806,6 +3868,36 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "latency scheduling temporarily unavailable; retry after 5 seconds")
 			return
 		}
+		// 会话级闸门：上游按 session 计路由配额，WS 长连接同样算同一会话并发。
+		// 拿不到会话槽位就把账号槽位还回去、排除该账号后换号。
+		sessionReleaseFunc, sessionAdmitted := h.tryAcquireOpenAISessionSlot(ctx, account, sessionHash)
+		if !sessionAdmitted {
+			if accountReleaseFunc != nil {
+				accountReleaseFunc()
+			}
+			reqLog.Warn("openai.websocket_session_slot_unavailable",
+				zap.Int64("account_id", account.ID),
+				zap.String("session_hash", sessionHash),
+				zap.Int("limit", account.OpenAISessionMaxConcurrency()),
+			)
+			failedAccountIDs[account.ID] = struct{}{}
+			if switchCount >= maxAccountSwitches {
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "too many concurrent requests for this session, please retry later")
+				return
+			}
+			switchCount++
+			continue
+		}
+		if sessionReleaseFunc != nil {
+			if accountReleaseFunc != nil {
+				accountReleaseFunc = sync.OnceFunc(func() {
+					sessionReleaseFunc()
+					accountReleaseFunc()
+				})
+			} else {
+				accountReleaseFunc = sync.OnceFunc(sessionReleaseFunc)
+			}
+		}
 		// 准入完成：门并入连接 ctx，turn 级复核与 failover 重选共用。
 		ctx = admissionCtx
 		c.Request = c.Request.WithContext(service.ContextWithSelectionPriorityRequest(c.Request.Context(), selection))
@@ -4124,7 +4216,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				// 的 passthrough 还会拒绝重叠 response.create。等待 worker 只看到
 				// 本轮 BeforeRequest 生成的不可变权限。
 				turnQueueCtx := service.WithAPIKeyQueueRequestPermissions(turnBillingCtx, turnQueuePermissions)
-				userReleaseFunc, accountReleaseFunc, err := h.admitOpenAIWSTurnForPricing(turnQueueCtx, c, subject.UserID, subject.Concurrency, apiKey, account, accountMaxConcurrency, turn, reqLog, &turnPricing)
+				userReleaseFunc, accountReleaseFunc, err := h.admitOpenAIWSTurnForPricing(turnQueueCtx, c, subject.UserID, subject.Concurrency, apiKey, account, accountMaxConcurrency, sessionHash, turn, reqLog, &turnPricing)
 				if err != nil {
 					return err
 				}

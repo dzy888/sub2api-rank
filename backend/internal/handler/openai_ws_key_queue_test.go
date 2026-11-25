@@ -193,7 +193,7 @@ func TestOpenAIWSTurnPricingFreezesAfterBlockedKeyGrant(t *testing.T) {
 	account := &service.Account{ID: 1, Concurrency: 3}
 	go func() {
 		userRelease, accountRelease, err := h.admitOpenAIWSTurnForPricing(
-			ctx, c, 202, 3, &service.APIKey{ID: 77, ConcurrencyLimit: 1}, account, 3, 2, nil, &pricing,
+			ctx, c, 202, 3, &service.APIKey{ID: 77, ConcurrencyLimit: 1}, account, 3, "", 2, nil, &pricing,
 		)
 		resultCh <- pricingAdmissionResult{userRelease: userRelease, accountRelease: accountRelease, err: err}
 	}()
