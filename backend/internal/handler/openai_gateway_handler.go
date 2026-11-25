@@ -3059,6 +3059,8 @@ func (h *OpenAIGatewayHandler) acquireOpenAISessionSlot(c *gin.Context, account 
 		return nil, nil
 	}
 	limit := account.OpenAISessionMaxConcurrency()
+	reqLog.Info("openai.session_gate_probe", zap.Int64("account_id", account.ID),
+		zap.Int("limit", limit), zap.String("session_hash", sessionHash))
 	if limit <= 0 || strings.TrimSpace(sessionHash) == "" {
 		return nil, nil
 	}

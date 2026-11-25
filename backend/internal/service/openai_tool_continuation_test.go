@@ -25,7 +25,10 @@ func TestNeedsToolContinuationSignals(t *testing.T) {
 		{name: "tools", body: map[string]any{"tools": []any{map[string]any{"type": "function"}}}, want: true},
 		{name: "tools_empty", body: map[string]any{"tools": []any{}}, want: false},
 		{name: "tools_invalid", body: map[string]any{"tools": "bad"}, want: false},
-		{name: "tool_choice", body: map[string]any{"tool_choice": "auto"}, want: true},
+		// 官方客户端恒发 tool_choice="auto"（codex-rs client.rs:1373），
+		// 它是默认值而非续链信号；显式的 required / 函数对象才算信号。
+		{name: "tool_choice_auto", body: map[string]any{"tool_choice": "auto"}, want: false},
+		{name: "tool_choice_required", body: map[string]any{"tool_choice": "required"}, want: true},
 		{name: "tool_choice_object", body: map[string]any{"tool_choice": map[string]any{"type": "function"}}, want: true},
 		{name: "tool_choice_empty_object", body: map[string]any{"tool_choice": map[string]any{}}, want: false},
 		{name: "none", body: map[string]any{"input": []any{map[string]any{"type": "text", "text": "hi"}}}, want: false},

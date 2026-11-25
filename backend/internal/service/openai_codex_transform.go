@@ -190,8 +190,18 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 	if normalizeOpenAIOAuthResponsesCompatibilityFields(reqBody) {
 		result.Modified = true
 	}
-	// 工具续链需求会影响存储策略与 input 过滤逻辑。
+	// 工具续链需求会影响存储策略与 input 过滤逻辑。必须在补齐信封字段之前判定：
+	// 补出来的 tool_choice="auto" 本身会被当成续链信号，若先补再判，会把普通
+	// 首轮请求误判成续链，进而保留 input id、不再默认 store=false。
 	needsToolContinuation := NeedsToolContinuation(reqBody)
+	// 补齐真实 Codex 无条件发送的字段（见 codex-rs client.rs:1369 的
+	// ResponsesApiRequest 字面量）。缺这些字段的请求一眼就不是官方客户端。
+	// readable replay 的 controls digest 在 spoof 之前就已记录（openai_409_omit_history.go
+	// 的 oauthControlsDigest 覆盖 tool_choice / parallel_tool_calls），此处再补会让
+	// digest 与实际请求不一致。replay 的 body 本身来自原始快照，字段已经齐备。
+	if !opts.PreserveReadableReplay && alignCodexRequestEnvelope(reqBody) {
+		result.Modified = true
+	}
 
 	model := ""
 	if v, ok := reqBody["model"].(string); ok {
@@ -1955,3 +1965,60 @@ func normalizeCodexTools(reqBody map[string]any) bool {
 
 	return modified
 }
+
+// alignCodexRequestEnvelope 补上官方客户端每次都发的字段。
+//
+// 出处 codex-rs/core/src/client.rs:1369 的 ResponsesApiRequest 构造：
+//
+//	tool_choice          恒为 "auto"（非 Option，必发）
+//	parallel_tool_calls  必发 bool
+//	store                恒为 false
+//	stream               恒为 true
+//	include              至少包含 "reasoning.encrypted_content"
+//	reasoning            Some(...)，含 effort / summary
+//
+// 只补缺省值，不覆盖客户端/上层策略已经写好的字段。
+func alignCodexRequestEnvelope(reqBody map[string]any) bool {
+	if reqBody == nil {
+		return false
+	}
+	changed := false
+
+	// tool_choice 既可以是字符串，也可以是 allowed_tools 对象；只在缺失或空串时补，
+	// 不能覆盖客户端声明的对象形态。
+	switch v := reqBody["tool_choice"].(type) {
+	case string:
+		if strings.TrimSpace(v) == "" {
+			reqBody["tool_choice"] = "auto"
+			changed = true
+		}
+	case nil:
+		reqBody["tool_choice"] = "auto"
+		changed = true
+	}
+	if _, ok := reqBody["parallel_tool_calls"].(bool); !ok {
+		reqBody["parallel_tool_calls"] = true
+		changed = true
+	}
+
+	// include 只在完全缺失时补默认值。客户端已声明的 include 是其协议意图
+	// （例如 lite / replay 形态会省略 encrypted_content），不能在此改写。
+	if _, exists := reqBody["include"]; !exists {
+		reqBody["include"] = []any{codexIncludeReasoningEncrypted}
+		changed = true
+	}
+
+	// reasoning 对象只在完全缺失时建壳，不填 effort：effort 由模型映射与后缀
+	// 推导链决定（openai_reasoning_effort_candidates），提前写死会覆盖推导结果。
+	if _, exists := reqBody["reasoning"]; !exists {
+		reqBody["reasoning"] = map[string]any{}
+		changed = true
+	}
+	return changed
+}
+
+const (
+	codexIncludeReasoningEncrypted = "reasoning.encrypted_content"
+	// 官方默认档位来自模型目录的 default_reasoning_level，网关侧取 medium。
+	codexDefaultReasoningEffort = "medium"
+)

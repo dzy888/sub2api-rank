@@ -465,7 +465,11 @@ func hasToolsSignal(reqBody map[string]any) bool {
 	return false
 }
 
-// hasToolChoiceSignal 判断 tool_choice 是否显式声明（非空或非 nil）。
+// hasToolChoiceSignal 判断 tool_choice 是否显式声明了非默认语义。
+//
+// 官方 Codex 的 ResponsesApiRequest 恒发 tool_choice="auto"（client.rs:1373），
+// 所以 "auto" 是默认值而不是续链信号：网关补上它之后若仍按“非空即信号”判断，
+// 会把普通首轮请求误判成工具续链，从而跳过 WS prewarm、保留 input id。
 func hasToolChoiceSignal(reqBody map[string]any) bool {
 	raw, exists := reqBody["tool_choice"]
 	if !exists || raw == nil {
@@ -473,7 +477,8 @@ func hasToolChoiceSignal(reqBody map[string]any) bool {
 	}
 	switch value := raw.(type) {
 	case string:
-		return strings.TrimSpace(value) != ""
+		trimmed := strings.ToLower(strings.TrimSpace(value))
+		return trimmed != "" && trimmed != "auto"
 	case map[string]any:
 		return len(value) > 0
 	default:

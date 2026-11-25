@@ -2165,6 +2165,12 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		apiKeyID := getAPIKeyIDFromContext(c)
 		harvestSession := s.harvestPinnedSessionForModel(ctx, account, extractOpenAICodexTicketModel(body))
 		sessionSeed := promptCacheKey
+		// 会话粘性与上游 prompt cache 都靠一个稳定的 session 命名空间。
+		// 客户端没声明任何身份时不能留空，否则每次请求各自命名空间、缓存必然不命中；
+		// 退化为按客户端声明的 session/thread 派生，仍无身份才用内容稳定前缀。
+		if sessionSeed == "" && harvestSession == "" && !isOpenAIResponsesCompactPath(c) {
+			sessionSeed = stableOpenAIUpstreamSessionSeed(c, body)
+		}
 		if recovery := openAIAgentRecoveryFromContext(ctx); recovery != nil && recovery.omittedHistory && sessionSeed == "" && !isOpenAIResponsesCompactPath(c) {
 			// An authorized readable rebuild needs a new upstream namespace even
 			// for header-only clients. Use the ORIGINAL client identity, never an
@@ -2260,6 +2266,25 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		return nil, err
 	}
 	return req, nil
+}
+
+// stableOpenAIUpstreamSessionSeed 为缺少显式会话身份的请求派生一个稳定种子。
+//
+// 上游的 prompt cache 与路由配额都按 session 归属：同一真实会话的连续请求必须
+// 落在同一命名空间，缓存才能命中。客户端常见行为是只给 thread/session 头而不给
+// prompt_cache_key，或者什么都不给；前者用声明身份，后者退回内容稳定前缀。
+func stableOpenAIUpstreamSessionSeed(c *gin.Context, body []byte) string {
+	if c != nil && c.Request != nil {
+		for _, header := range []string{"session-id", "session_id", "thread-id", "thread_id", "conversation_id"} {
+			if v := strings.TrimSpace(c.GetHeader(header)); v != "" {
+				return "client:" + v
+			}
+		}
+	}
+	if seed := deriveOpenAIAnchoredContentSessionSeed(body); seed != "" {
+		return "content:" + seed
+	}
+	return ""
 }
 
 // codexIdentityOverrideUA 返回账号级显式配置的出站 User-Agent，供强制统一身份时作为覆写来源。

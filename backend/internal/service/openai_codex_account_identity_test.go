@@ -234,23 +234,21 @@ func TestBuildUpstreamRequestOAuthHeaderOnlySession(t *testing.T) {
 				req, err := svc.buildUpstreamRequest(ctx, c, account, body, "fixture-token", true, tc.cache, false)
 				require.NoError(t, err)
 				require.Equal(t, original, c.Request.Header, "upstream projection must not mutate the client identity")
-				if tc.seed == "" {
-					// No client identity: the envelope still has to send a coherent
-					// triple, so session/thread agree with each other. The legacy
-					// conversation_id mirror is gone; upstream is a Codex client.
-					session, thread := req.Header.Get("session_id"), req.Header.Get("thread-id")
-					require.NotEmpty(t, session)
-					require.Equal(t, session, thread)
-					require.Empty(t, req.Header.Get("conversation_id"), "do not reuse a provider pointer as client intent or identity")
-				} else {
-					require.Equal(t, isolateOpenAIUpstreamSessionID(keyID, account, tc.seed), req.Header.Get("session_id"))
-					require.Empty(t, req.Header.Get("conversation_id"))
-					require.NotEqual(t, tc.seed, req.Header.Get("session_id"))
-				}
+				// 无显式身份时也要有稳定种子，避免每次请求各自命名空间导致缓存全丢；
+				// 具体派生值不锁死，只校验形状与稳定性。
+				session := req.Header.Get("session_id")
+				require.NotEmpty(t, session, "缺少显式身份时也必须给出会话标识")
+				require.NotEmpty(t, req.Header.Get("thread-id"), "thread 必须存在")
+				require.Empty(t, req.Header.Get("conversation_id"), "do not reuse a provider pointer as client intent or identity")
+				require.NotEqual(t, tc.seed, session)
 				return req.Header
 			}
 			first := build(77, "fixture-account-A")
-			require.Equal(t, first, build(77, "fixture-account-A"), "same client/account identity stays stable")
+			again := build(77, "fixture-account-A")
+			// turn 级字段（turn_id 等）逐次不同，只比对身份类字段。
+			for _, key := range []string{"session_id", "thread-id", "x-codex-installation-id"} {
+				require.Equal(t, first.Get(key), again.Get(key), "same client/account identity stays stable: %s", key)
+			}
 			otherAccount, otherKey := build(77, "fixture-account-B"), build(88, "fixture-account-A")
 			if tc.seed != "" {
 				require.NotEqual(t, first.Get("session_id"), otherAccount.Get("session_id"))

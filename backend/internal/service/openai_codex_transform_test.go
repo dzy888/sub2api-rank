@@ -413,7 +413,10 @@ func TestApplyCodexOAuthTransform_ImageAndWebSearchCallsDoNotGainCallID(t *testi
 
 	first, ok := input[0].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "ig_123", first["id"])
+	// tool_choice="auto" 是官方默认值而非续链信号（codex-rs client.rs:1373），
+	// 因此非续链路径会剥掉 image_call 的 id（它不在受约束前缀表里）。
+	_, hasID := first["id"]
+	require.False(t, hasID)
 	_, hasCallID := first["call_id"]
 	require.False(t, hasCallID)
 
