@@ -121,6 +121,17 @@ func TestAdminOpenAIProxySessionAffinityValidatesAndPreservesOptIn(t *testing.T)
 	}})
 	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err), "session affinity requires request proxy mode and a proxy group")
 
+	// Affinity binds each conversation to one exit but binds conversations
+	// independently, so several exits are valid and each session still gets a
+	// stable single IP.
+	repo.account = &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{
+		OpenAIProxyModeKey: OpenAIProxyModeRequest, OpenAIProxyIDsKey: []int64{11, 22},
+	}}
+	_, err = svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{Extra: map[string]any{
+		OpenAIProxySessionAffinityKey: true,
+	}})
+	require.NoError(t, err, "affinity supports several exits, one per conversation")
+
 	repo.account = &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{
 		OpenAIProxyModeKey: OpenAIProxyModeRequest, OpenAIProxyIDsKey: []int64{11}, OpenAIProxySessionAffinityKey: true,
 	}}

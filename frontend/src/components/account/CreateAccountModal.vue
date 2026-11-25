@@ -3268,7 +3268,8 @@
           <ProxyAdBanner />
         </div>
         <OpenAIProxySettings v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
-          v-model:mode="openaiProxyMode" v-model:single-proxy-id="form.proxy_id" v-model:proxy-ids="openaiProxyIds"
+          v-model:mode="openaiProxyMode" v-model:session-affinity="openaiProxySessionAffinity"
+          v-model:single-proxy-id="form.proxy_id" v-model:proxy-ids="openaiProxyIds"
           :proxies="proxies" :loading="proxiesLoading" :load-error="proxiesLoadError"
           :user-id="authStore.user?.id" @retry="emit('retry-proxies')" />
         <ProxySelector v-else v-model="form.proxy_id" :proxies="proxies" />
@@ -4707,6 +4708,7 @@ const openaiBPSOAuth = ref(false)
 const bpsOAuthModels = ref<string[]>([...DEFAULT_EXCEL_BPS_MODELS])
 const openaiProxyMode = ref<'single' | 'request'>('single')
 const openaiProxyIds = ref<number[]>([])
+const openaiProxySessionAffinity = ref(false)
 const openaiAuthorizationProxy = ref<{
   sessionId: string
   mode: 'single' | 'request'
@@ -6152,6 +6154,7 @@ const resetForm = () => {
   openaiBPSOAuth.value = false
   bpsOAuthModels.value = [...DEFAULT_EXCEL_BPS_MODELS]
   openaiProxyMode.value = 'single'
+  openaiProxySessionAffinity.value = false
   openaiProxyIds.value = []
   openaiAuthorizationProxy.value = null
   autoBPS.reset()
@@ -6317,6 +6320,9 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   if (accountCategory.value === 'oauth-based') {
     extra.openai_proxy_mode = openaiProxyMode.value
     extra.openai_proxy_ids = [...openaiProxyIds.value]
+    if (openaiProxyMode.value === 'request' && openaiProxySessionAffinity.value) {
+      extra.openai_request_proxy_session_affinity = true
+    }
     extra.openai_oauth_responses_websockets_v2_mode = openaiOAuthResponsesWebSocketV2Mode.value
     extra.openai_oauth_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(openaiOAuthResponsesWebSocketV2Mode.value)
     applyAccountRPMSettings(extra, {
@@ -6422,6 +6428,7 @@ const buildOpenAICodexImportExtra = (supportsProxyGroup = true): Record<string, 
   if (!supportsProxyGroup) {
     delete extra.openai_proxy_mode
     delete extra.openai_proxy_ids
+    delete extra.openai_request_proxy_session_affinity
   }
   return Object.keys(extra).length > 0 ? extra : undefined
 }

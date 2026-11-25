@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -270,13 +271,16 @@ func resolveConvergedThreadID(seed, clientSessionID string) string {
 // 确保所有载体中的 turn_id 等随机字段一致。体改写时还会补记原始
 // client_metadata.session_id，用于识别 root prompt_cache_key 的默认值。
 type codexFingerprintIDs struct {
-	accountID                     int64
-	mode                          codexFingerprintMode
-	installationID                string
-	sessionID                     string
-	threadID                      string
-	turnID                        string
-	windowID                      string
+	accountID      int64
+	mode           codexFingerprintMode
+	installationID string
+	sessionID      string
+	threadID       string
+	turnID         string
+	windowID       string
+	// windowNumber 是真实客户端的上下文窗口序号：初始 0，每次压缩 +1。
+	// 网关无状态，按“本请求是否携带 previous_response_id / 压缩标记”推导。
+	windowNumber                  uint64
 	turnStartedAtUnixMs           int64
 	originalBodySessionID         string
 	originalBodySessionIDCaptured bool
@@ -322,14 +326,14 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 			ids.threadID = ids.sessionID
 		}
 		ids.turnID = uuid.Must(uuid.NewV7()).String()
-		ids.windowID = ids.threadID + ":0"
+		ids.windowID = codexWindowID(ids.threadID, ids.windowNumber)
 		return ids
 
 	case codexFingerprintFull:
 		ids.sessionID = resolveConvergedSessionID(seed)
 		ids.threadID = ids.sessionID
 		ids.turnID = uuid.Must(uuid.NewV7()).String()
-		ids.windowID = ids.threadID + ":0"
+		ids.windowID = codexWindowID(ids.threadID, ids.windowNumber)
 		return ids
 
 	case codexFingerprintSubagent:
@@ -337,13 +341,49 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 		ids.parentThreadID = resolveConvergedRootThreadID(seed)
 		ids.threadID = resolveConvergedSubagentThreadID(seed, clientSessionID)
 		ids.turnID = uuid.Must(uuid.NewV7()).String()
-		ids.windowID = ids.threadID + ":0"
+		ids.windowID = codexWindowID(ids.threadID, ids.windowNumber)
 		ids.subagentKind = openAICodexSubagentKindThreadSpawn
 		ids.threadSource = openAICodexThreadSourceSubagent
 		return ids
 	}
 
 	return nil
+}
+
+// codexWindowID 按真实客户端的形态拼出 window id：`{thread_id}:{window_number}`。
+// 见 codex-rs session/mod.rs current_window_from_state。
+func codexWindowID(threadID string, windowNumber uint64) string {
+	if threadID == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d", threadID, windowNumber)
+}
+
+// resolveCodexWindowNumber 推导本次请求应声明的上下文窗口序号。
+// 真实客户端从 0 开始，每压缩一次上下文 +1；网关没有本地窗口状态，因此按请求
+// 携带的续接信号近似：没有 previous_response_id 与压缩标记的独立 turn 视为首个窗口。
+func resolveCodexWindowNumber(clientHeaders http.Header, body []byte) uint64 {
+	if clientHeaders == nil && len(body) == 0 {
+		return 0
+	}
+	if clientHeaders != nil {
+		if raw := strings.TrimSpace(clientHeaders.Get(openAIWSWindowIDHeader)); raw != "" {
+			if _, number, ok := strings.Cut(raw, ":"); ok {
+				if parsed, err := strconv.ParseUint(strings.TrimSpace(number), 10, 64); err == nil {
+					return parsed
+				}
+			}
+		}
+	}
+	if len(body) > 0 {
+		if gjson.GetBytes(body, "previous_response_id").String() != "" {
+			return 1
+		}
+		if HasCompactionTriggerInInput(body) {
+			return 1
+		}
+	}
+	return 0
 }
 
 // resolveConvergedRootThreadID 返回会话的根线程：子代理的 parent_thread_id。
@@ -385,6 +425,12 @@ func extractClientSessionID(h http.Header) string {
 // 结合账号配置一次性解析收敛 ID 集合。调用方应将返回的 ids 同时传给
 // applyCodexFingerprintHeaders 和 applyCodexFingerprintClientMetadata。
 func resolveCodexFingerprintIDsFromRequest(account *Account, clientHeaders http.Header) *codexFingerprintIDs {
+	return resolveCodexFingerprintIDsFromRequestWithBody(account, clientHeaders, nil)
+}
+
+// resolveCodexFingerprintIDsFromRequestWithBody 在解析收敛 ID 的同时按请求体推导
+// 上下文窗口序号；body 为 nil 时退化为仅看头。
+func resolveCodexFingerprintIDsFromRequestWithBody(account *Account, clientHeaders http.Header, body []byte) *codexFingerprintIDs {
 	if account == nil {
 		return nil
 	}
@@ -396,7 +442,12 @@ func resolveCodexFingerprintIDsFromRequest(account *Account, clientHeaders http.
 	if clientHeaders != nil {
 		clientSessionID = extractClientSessionID(clientHeaders)
 	}
-	return resolveCodexFingerprintIDs(account, clientSessionID, mode)
+	ids := resolveCodexFingerprintIDs(account, clientSessionID, mode)
+	if ids != nil {
+		ids.windowNumber = resolveCodexWindowNumber(clientHeaders, body)
+		ids.windowID = codexWindowID(ids.threadID, ids.windowNumber)
+	}
+	return ids
 }
 
 // applyCodexFingerprintHeaders 按预计算的收敛 ID 改写出站 HTTP 头中的设备指纹。
@@ -430,6 +481,7 @@ func applyCodexFingerprintHeaders(h http.Header, ids *codexFingerprintIDs) {
 		"thread_id":               ids.threadID,
 		"turn_id":                 ids.turnID,
 		"window_id":               ids.windowID,
+		"window_number":           ids.windowNumber,
 		"turn_started_at_unix_ms": ids.turnStartedAtUnixMs,
 	}
 	if ids.mode == codexFingerprintSubagent {
@@ -447,8 +499,13 @@ func applyCodexFingerprintHeaders(h http.Header, ids *codexFingerprintIDs) {
 		if ids.subagentKind != "" {
 			fields["subagent_kind"] = ids.subagentKind
 		}
-		// 子代理轮次不声明 request_kind，与真实 Codex 保持一致（未声明视同 turn）。
-		delete(fields, "request_kind")
+	}
+	// 真实 Codex 的每次 turn 都显式声明 request_kind=turn（见 codex-rs
+	// turn_metadata.rs 的 to_responses_metadata），因此 x-codex-turn-metadata
+	// 头从不为空。客户端没带过这个头时（网关合成的并发请求）在这里补齐，
+	// 避免出站少一个官方客户端每次都会带的字段。
+	if _, exists := fields["request_kind"]; !exists {
+		fields["request_kind"] = openAICodexRequestKindTurn
 	}
 	rewriteCodexTurnMetadataFields(h, fields)
 }
@@ -457,11 +514,11 @@ func applyCodexFingerprintHeaders(h http.Header, ids *codexFingerprintIDs) {
 // 替换指定字段后回写。合法对象保留未指定字段（如 sandbox、thread_source）；
 // 非法/非对象值重建为最小合法 metadata，避免 flat 与 embedded identity 分裂。
 func rewriteCodexTurnMetadataFields(h http.Header, fields map[string]any) {
-	raw := strings.TrimSpace(h.Get("x-codex-turn-metadata"))
-	if raw == "" {
+	if h == nil {
 		return
 	}
 	var metadata map[string]any
+	raw := strings.TrimSpace(h.Get("x-codex-turn-metadata"))
 	if err := json.Unmarshal([]byte(raw), &metadata); err != nil || metadata == nil {
 		metadata = make(map[string]any, len(fields))
 	}
@@ -533,6 +590,7 @@ func applyCodexFingerprintToClientMetadataMap(existing map[string]any, ids *code
 		"thread_id":               ids.threadID,
 		"turn_id":                 ids.turnID,
 		"window_id":               ids.windowID,
+		"window_number":           ids.windowNumber,
 		"turn_started_at_unix_ms": ids.turnStartedAtUnixMs,
 	}
 	if ids.mode == codexFingerprintSubagent {

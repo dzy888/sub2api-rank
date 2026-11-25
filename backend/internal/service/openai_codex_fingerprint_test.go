@@ -1052,3 +1052,49 @@ func TestApplyCodexOutboundEnvelopeAlignsIdentityTriple(t *testing.T) {
 	assert.Equal(t, empty.Get("session-id"), empty.Get("thread-id"))
 	assert.Equal(t, empty.Get("thread-id")+":0", empty.Get("x-codex-window-id"))
 }
+
+func TestResolveCodexWindowNumber(t *testing.T) {
+	// 独立 turn：首个窗口。
+	require.EqualValues(t, 0, resolveCodexWindowNumber(http.Header{}, []byte(`{"input":"hi"}`)))
+	// 续接或压缩：窗口已推进。
+	require.EqualValues(t, 1, resolveCodexWindowNumber(http.Header{}, []byte(`{"previous_response_id":"resp_1"}`)))
+	require.EqualValues(t, 1, resolveCodexWindowNumber(http.Header{}, []byte(`{"input":[{"type":"compaction_trigger"}]}`)))
+	// 客户端自带 window id 时以其为准。
+	h := http.Header{}
+	h.Set(openAIWSWindowIDHeader, "thread-x:3")
+	require.EqualValues(t, 3, resolveCodexWindowNumber(h, nil))
+	// 形态不符时回落。
+	bad := http.Header{}
+	bad.Set(openAIWSWindowIDHeader, "thread-x")
+	require.EqualValues(t, 0, resolveCodexWindowNumber(bad, nil))
+}
+
+func TestSubagentEnvelopeCarriesWindowNumberAndRequestKind(t *testing.T) {
+	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "subagent"})
+	ids := resolveCodexFingerprintIDsFromRequestWithBody(account, http.Header{},
+		[]byte(`{"previous_response_id":"resp_1"}`))
+	require.NotNil(t, ids)
+	require.EqualValues(t, 1, ids.windowNumber)
+	require.Equal(t, ids.threadID+":1", ids.windowID)
+
+	h := http.Header{}
+	applyCodexFingerprintHeaders(h, ids)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(h.Get("x-codex-turn-metadata")), &parsed))
+	// 真实客户端每次 turn 都带这两个字段；缺失是廉价指纹。
+	require.Equal(t, openAICodexRequestKindTurn, parsed["request_kind"])
+	require.EqualValues(t, 1, parsed["window_number"])
+	require.Equal(t, ids.windowID, parsed["window_id"])
+}
+
+func TestEnvelopeEmitsTurnMetadataWhenClientSentNone(t *testing.T) {
+	// 网关合成的请求没有 turn metadata 头，补出来的必须是合法最小对象。
+	h := http.Header{}
+	h.Set("session_id", "s-1")
+	h.Set("thread-id", "t-1")
+	applyCodexOutboundEnvelope(h)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(h.Get("x-codex-turn-metadata")), &parsed))
+	require.Equal(t, "s-1", parsed["session_id"])
+	require.Equal(t, "t-1", parsed["thread_id"])
+}

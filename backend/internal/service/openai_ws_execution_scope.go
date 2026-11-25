@@ -140,6 +140,10 @@ func resolveOpenAIWSExecutionLane(c *gin.Context, body []byte) string {
 // 主道（turn / prewarm / compaction / 未声明）返回空串，其余 request_kind 各自成道，取值
 // 语义见上面的常量注释；没有线程元数据但声明了 x-openai-subagent 的（guardian 评分器）
 // 按子智能体值成道，它们与用户 turn 同键时同样会互相切断在飞轮次。
+//
+// 子代理带自己的 thread_id 时留在主道：作用域键已经按线程区分，再叠一层 subagent
+// 道会把同一线程拆成两段。收敛模式（subagent 指纹）给每个并发请求分配独立线程，
+// 因此同样落在主道、靠线程区分，与真实 Codex 的子代理同形。
 func (l *openAIWSClientMetadataLookup) lane(c *gin.Context) string {
 	metadata := l.turnMetadata(c)
 	switch metadata.RequestKind {

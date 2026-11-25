@@ -1004,6 +1004,8 @@ export default {
     proxyModeSingle: '单代理',
     proxyModeRequest: '多代理（按请求分散）',
     proxyRequestRisk: '同账号使用多个 IP 可能增加异常验证、限流或账号限制风险，不保证提升吞吐。建议控制总并发；需要恢复单出口时切回单代理，或停用账号。',
+    proxySessionAffinity: '会话绑定单一出口',
+    proxySessionAffinityHint: '同一个会话（session_id）的请求固定走同一条出口，上游看到的是“一个会话一个 IP”；不同会话各自绑定不同出口，负载仍然分摊。适合并发高、想让上游把流量看成正常用户会话的场景。',
     proxyGroup: '账号代理组（从 IP 管理选择）',
     proxyRequestHint: '适用于普通 OpenAI OAuth 和 BPS。仅使用所选代理，优先分配当前账号在途请求最少的出口，同会话可分散；账号总并发上限不变，不可用时不会直连。授权与维护使用组内首个有效代理。',
     proxyRequired: '按请求分散模式至少需要选择一个代理',

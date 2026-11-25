@@ -183,14 +183,18 @@ func (p codexDeviceProfile) String() string {
 // 网关原先对每个账号都发同一段 Ubuntu/xterm，账号一多，这段固定串本身就成了
 // 「同一台机器上跑着一堆 Codex」的指纹。按账号确定性取一份，既跨账号分散，
 // 又保证同一账号长期自洽。
+//
+// 权重贴近真实取样：Linux 服务器/容器占多数，macOS 次之，Windows 少量；
+// 终端一律写真实 CLI 会检测到的取值，不写浏览器或图形终端品牌。
 var codexDeviceProfiles = [...]codexDeviceProfile{
-	{"Mac OS X", "14.7.0", "arm64", "iTerm.app/3.5.14"},
-	{"Mac OS X", "15.1.0", "arm64", "Apple_Terminal/455"},
-	{"Mac OS X", "14.5.0", "arm64", "vscode/1.96.2"},
 	{"Ubuntu", "24.4.0", "x86_64", "xterm-256color"},
-	{"Ubuntu", "22.4.0", "x86_64", "tmux"},
-	{"Linux", "6.8.0", "x86_64", "Alacritty"},
-	{"Mac OS X", "13.6.0", "arm64", "WarpTerminal"},
+	{"Ubuntu", "22.4.0", "x86_64", "xterm-256color"},
+	{"Ubuntu", "24.4.0", "x86_64", "tmux"},
+	{"Debian GNU/Linux", "12", "x86_64", "xterm-256color"},
+	{"Linux", "6.8.0", "x86_64", "screen"},
+	{"Mac OS X", "15.1.0", "arm64", "iTerm.app/3.5.14"},
+	{"Mac OS X", "14.7.0", "arm64", "Apple_Terminal/455"},
+	{"Windows", "11", "x86_64", "WindowsTerminal"},
 }
 
 // resolveCodexDeviceSuffix 按账号种子确定性选择一份设备指纹。
@@ -250,6 +254,7 @@ const (
 	openAICodexSubagentThreadSpawnValue  = "collab_spawn"
 	openAICodexThreadSourceSubagent      = "subagent"
 	openAICodexSubagentKindThreadSpawn   = "thread_spawn"
+	openAICodexRequestKindTurn           = "turn"
 	openAICodexWindowIDSuffix            = ":0"
 )
 

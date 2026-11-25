@@ -52,6 +52,14 @@ func (a *Account) OpenAIRequestProxyEnabled() bool {
 	return a.IsExcelBPSEnabled() && a.OpenAIProxyMode() == OpenAIProxyModeRequest
 }
 
+// OpenAIRequestProxySessionAffinityEnabled pins every conversation to one exit.
+//
+// It stays effective even with a single configured exit: the session lease then
+// records which exit owns the conversation, so a temporarily unhealthy exit
+// drains the session instead of silently moving the same session to another IP.
+// Keeping one rule for any exit count also means an account configured with one
+// exit behaves identically to a multi-exit account pinned to one, and measured
+// traffic stays on one IP either way.
 func (a *Account) OpenAIRequestProxySessionAffinityEnabled() bool {
 	if a == nil || !a.OpenAIRequestProxyEnabled() {
 		return false
