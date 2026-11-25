@@ -254,6 +254,30 @@ func (s *OpenAIGatewayService) detachOpenAIWSReadableProviderHeaders(ctx context
 	}
 }
 
+// stageWSFingerprintIDs 为 WS 入口解析并暂存指纹收敛 ID。
+//
+// 与 HTTP 的 openai_gateway_forward 保持一致：同一份 IDs 同时供请求体
+// （applyStagedCodexFingerprintClientMetadata）与握手头
+// （applyStagedCodexFingerprintHeaders）使用，保证 turn_id 等随机字段一致。
+// 必须先于 applyStagedCodexFingerprintClientMetadata 调用，否则拿到的永远是 nil。
+func stageWSFingerprintIDs(c *gin.Context, account *Account, reqBody map[string]any) {
+	if c == nil || account == nil || !account.UsesOpenAICodexProtocol() {
+		stageCodexFingerprintIDs(c, nil)
+		return
+	}
+	if account.GetCodexFingerprintMode() == codexFingerprintOff {
+		stageCodexFingerprintIDs(c, nil)
+		return
+	}
+	var clientHeaders http.Header
+	if c.Request != nil {
+		clientHeaders = c.Request.Header
+	}
+	body, _ := json.Marshal(reqBody)
+	ids := resolveCodexFingerprintIDsFromRequestWithBody(account, clientHeaders, body)
+	stageCodexFingerprintIDs(c, ids)
+}
+
 func (s *OpenAIGatewayService) buildOpenAIWSCreatePayload(reqBody map[string]any, account *Account) map[string]any {
 	// OpenAI WS Mode 协议：response.create 字段与 HTTP /responses 基本一致。
 	// 保留 stream 字段（与 Codex CLI 一致），仅移除 background。
