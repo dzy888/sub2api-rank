@@ -1678,6 +1678,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	firstRoutingFields := gjson.GetManyBytes(firstPayload.payloadRaw, "model", "service_tier")
+	// 握手头与 body 必须共用同一份收敛身份：指纹 ID 必须先 stage，buildOpenAIWSHeaders
+	// 里的 applyStagedCodexFingerprintHeaders 才能读到。此前只有 HTTP 出站
+	// (openai_gateway_forward) 会 stage，WS ingress 从不 stage，于是握手与
+	// response.create 的 client_metadata 都缺 installation_id / request_kind /
+	// thread_source / turn_id 等 Codex 恒发字段（client.rs:1369 与 HTTP 共用
+	// 同一个 client_metadata 构造）。
+	stageWSFingerprintIDsRaw(c, account, firstPayload.payloadRaw)
 	wsHeaders, _, buildHdrErr := s.buildOpenAIWSHeaders(
 		ctx,
 		c,

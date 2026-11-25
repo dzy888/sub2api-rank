@@ -118,13 +118,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		turnMetadata = strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
 	}
 	setOpenAIWSTurnMetadata(payload, turnMetadata)
-	// 与 HTTP 出站同源：指纹收敛 ID 必须先 stage，下面的
-	// applyStagedCodexFingerprintClientMetadata 才能拿到。此前只有
-	// openai_gateway_forward 的 HTTP 路径做过 stage，WS 入口永远拿到 nil，
-	// 于是 client_metadata 只剩入站透传的 session/thread/window 三项，
-	// 缺 installation_id / request_kind / thread_source / turn_id 等
-	// Codex 每条 response.create 都会带的字段（client.rs:1369 的
-	// client_metadata 与 HTTP 共用同一构造）。
+	// 注：指纹 stage 在 WS ingress 侧（openai_ws_forwarder_ingress.go 构造握手头之前）
+	// 完成；本函数也会被 ingress 复用，这里再 stage 一次可覆盖上一轮残留到本轮
+	// 的旧 ID（同一连接上的后续 turn 必须拿到新的 turn_id）。
 	stageWSFingerprintIDs(c, account, reqBody)
 	applyStagedCodexFingerprintClientMetadata(c, account, payload)
 	previousResponseID := openAIWSPayloadString(payload, "previous_response_id")

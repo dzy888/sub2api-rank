@@ -261,11 +261,23 @@ func (s *OpenAIGatewayService) detachOpenAIWSReadableProviderHeaders(ctx context
 // （applyStagedCodexFingerprintHeaders）使用，保证 turn_id 等随机字段一致。
 // 必须先于 applyStagedCodexFingerprintClientMetadata 调用，否则拿到的永远是 nil。
 func stageWSFingerprintIDs(c *gin.Context, account *Account, reqBody map[string]any) {
-	if c == nil || account == nil || !account.UsesOpenAICodexProtocol() {
+	if reqBody == nil {
+		stageWSFingerprintIDsRaw(c, account, nil)
+		return
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
 		stageCodexFingerprintIDs(c, nil)
 		return
 	}
-	if account.GetCodexFingerprintMode() == codexFingerprintOff {
+	stageWSFingerprintIDsRaw(c, account, body)
+}
+
+// stageWSFingerprintIDsRaw 是 stageWSFingerprintIDs 的字节版，供已经持有归一化
+// 请求帧（ingress 的 payloadRaw）的调用方使用，避免多余的 JSON 往返。
+func stageWSFingerprintIDsRaw(c *gin.Context, account *Account, body []byte) {
+	if c == nil || account == nil || !account.UsesOpenAICodexProtocol() ||
+		account.GetCodexFingerprintMode() == codexFingerprintOff {
 		stageCodexFingerprintIDs(c, nil)
 		return
 	}
@@ -273,9 +285,7 @@ func stageWSFingerprintIDs(c *gin.Context, account *Account, reqBody map[string]
 	if c.Request != nil {
 		clientHeaders = c.Request.Header
 	}
-	body, _ := json.Marshal(reqBody)
-	ids := resolveCodexFingerprintIDsFromRequestWithBody(account, clientHeaders, body)
-	stageCodexFingerprintIDs(c, ids)
+	stageCodexFingerprintIDs(c, resolveCodexFingerprintIDsFromRequestWithBody(account, clientHeaders, body))
 }
 
 func (s *OpenAIGatewayService) buildOpenAIWSCreatePayload(reqBody map[string]any, account *Account) map[string]any {
