@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"unsafe"
 
@@ -222,6 +223,14 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	s.detachOpenAIWSReadableProviderHeaders(ctx, headers, account)
 	s.restoreBoundCodexTicketHarvestIdentity(ctx, headers, account)
 
+	if account != nil {
+		s.debugLogGatewaySnapshot("UPSTREAM_WS_HANDSHAKE", headers, nil, map[string]string{
+			"account":        fmt.Sprintf("%d(%s)", account.ID, account.Name),
+			"transport":      string(decision.Transport),
+			"model":          routingModel,
+			"codex_protocol": strconv.FormatBool(account.UsesOpenAICodexProtocol()),
+		})
+	}
 	return headers, sessionResolution, nil
 }
 
