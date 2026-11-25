@@ -106,6 +106,9 @@ backend/internal/web/dist/*
 
 # 后端运行时缓存数据
 backend/data/
+# basispoints 图片中继的临时落盘目录：storageRoot 缺省解析为包内 ./data，
+# 本地跑 service 包测试会把 session-*/image-* 小文件写进源码树。
+backend/internal/service/data/
 
 # ===================
 # 本地配置文件（包含敏感信息）
