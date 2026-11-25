@@ -152,6 +152,9 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		// 透传分支禁止 400 请求体降级重试（该重试会改写请求体）
+		if failure := s.anthropicModelNotFoundFailover(c, account, resp); failure != nil {
+			return nil, failure
+		}
 		if resp.StatusCode >= 400 && resp.StatusCode != 400 && s.shouldRetryUpstreamError(account, resp.StatusCode) {
 			if attempt < maxRetryAttempts {
 				elapsed := time.Since(retryStart)
@@ -422,7 +425,7 @@ func (s *GatewayService) buildUpstreamRequestAnthropicAPIKeyPassthrough(
 	}
 
 	// 账号级请求头覆写（最终生效，覆盖上面所有来源的同名头）
-	account.ApplyHeaderOverrides(req.Header)
+	account.ApplyHeaderOverridesWithContext(req.Context(), req.Header)
 	filterSonnet55ToolsetBetaHeader(req.Header, body, gjson.GetBytes(body, "model").String())
 
 	if err := checkAPIKeyLongContextBeforeForward(ctx, c, s.billingService, body, gjson.GetBytes(body, "model").String()); err != nil {
