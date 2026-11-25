@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -2265,6 +2266,13 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	if err := applyMappedGPT55LiteCompatibility(req, account, body); err != nil {
 		return nil, err
 	}
+	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD", req.Header, body, map[string]string{
+		"url":              req.URL.String(),
+		"account":          fmt.Sprintf("%d(%s)", account.ID, account.Name),
+		"stream":           strconv.FormatBool(isStream),
+		"codex_protocol":   strconv.FormatBool(account.UsesOpenAICodexProtocol()),
+		"prompt_cache_key": promptCacheKey,
+	})
 	return req, nil
 }
 

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,9 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -551,6 +555,10 @@ type OpenAIGatewayService struct {
 	excelBPSRecoveryDone    chan struct{}
 	excelBPSRecoveryStopped bool
 
+	// debugGatewayBodyFile 是 SUB2API_DEBUG_GATEWAY_BODY 的写出目标，供
+	// OpenAI 出站请求快照使用（GatewayService 侧另有一份，同一个环境变量）。
+	debugGatewayBodyFile atomic.Pointer[os.File]
+
 	excelBPSWarmMu         sync.Mutex
 	excelBPSWarmCancel     context.CancelFunc
 	excelBPSWarmDone       chan struct{}
@@ -764,8 +772,72 @@ func NewOpenAIGatewayService(
 		registrar.SetAstraTicketLifecycle(svc)
 	}
 	svc.logOpenAIWSModeBootstrap()
+	svc.initDebugGatewayBodyFile()
 	svc.StartOpenAICodexTicketHarvester()
 	return svc
+}
+
+// debugGatewayBodyFile holds the SUB2API_DEBUG_GATEWAY_BODY sink for the OpenAI
+// path. GatewayService keeps its own copy for the Anthropic builder; both read
+// the same env var and append to the same file.
+func (s *OpenAIGatewayService) initDebugGatewayBodyFile() {
+	path := strings.TrimSpace(os.Getenv(debugGatewayBodyEnv))
+	if path == "" {
+		return
+	}
+	switch strings.ToLower(path) {
+	case "1", "true", "yes", "on":
+		path = debugGatewayBodyDefaultFilename
+	}
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		path = filepath.Join(path, debugGatewayBodyDefaultFilename)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	s.debugGatewayBodyFile.Store(f)
+	slog.Info("gateway debug logging enabled", "path", path)
+}
+
+// debugLogGatewaySnapshot appends one request snapshot. See
+// GatewayService.debugLogGatewaySnapshot for the format.
+func (s *OpenAIGatewayService) debugLogGatewaySnapshot(tag string, headers http.Header, body []byte, extra map[string]string) {
+	f := s.debugGatewayBodyFile.Load()
+	if f == nil {
+		return
+	}
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "\n========== [%s] %s ==========\n", time.Now().Format("2006-01-02 15:04:05.000"), tag)
+	if len(extra) > 0 {
+		fmt.Fprint(&buf, "--- context ---\n")
+		keys := make([]string, 0, len(extra))
+		for k := range extra {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(&buf, "  %s: %s\n", k, extra[k])
+		}
+	}
+	fmt.Fprint(&buf, "--- headers ---\n")
+	for _, k := range sortHeadersByWireOrder(headers) {
+		for _, v := range headers[k] {
+			fmt.Fprintf(&buf, "  %s: %s\n", k, safeHeaderValueForLog(k, v))
+		}
+	}
+	fmt.Fprint(&buf, "--- body ---\n")
+	if len(body) == 0 {
+		fmt.Fprint(&buf, "  (empty)\n")
+	} else {
+		var pretty bytes.Buffer
+		if json.Indent(&pretty, body, "  ", "  ") == nil {
+			fmt.Fprintf(&buf, "  %s\n", pretty.Bytes())
+		} else {
+			fmt.Fprintf(&buf, "  %s\n", body)
+		}
+	}
+	_, _ = f.WriteString(buf.String())
 }
 
 // ResolveChannelMapping 解析渠道级模型映射（代理到 ChannelService）
