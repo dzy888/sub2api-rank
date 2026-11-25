@@ -35,7 +35,7 @@
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.proxySessionMaxConcurrencyHint') }}</p>
       </div>
       <div class="w-32 flex-shrink-0">
-        <input v-model.number="sessionMaxConcurrency" data-testid="openai-proxy-session-max-concurrency"
+        <input :value="sessionMaxConcurrency" data-testid="openai-proxy-session-max-concurrency"
           type="number" min="0" step="1" class="input" :placeholder="t('admin.accounts.openai.proxySessionMaxConcurrencyOff')"
           @input="emit('update:sessionMaxConcurrency', normalizeLimit(($event.target as HTMLInputElement).value))" />
       </div>
