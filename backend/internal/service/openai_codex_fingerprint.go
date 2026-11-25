@@ -253,6 +253,19 @@ func resolveConvergedInstallationID(account *Account, seed string) string {
 	return deriveStableUUIDv4("sub2api:codex-install-id:v2:" + seed)
 }
 
+// resolveConvergedSessionIDForClient 按客户端会话派生 session_id：
+// 同一客户端会话在账号上始终对应同一个上游会话，不同客户端会话各自独立。
+// 无客户端身份时退回账号级恒定值。
+func resolveConvergedSessionIDForClient(seed, clientSessionID string) string {
+	if seed == "" {
+		return ""
+	}
+	if clientSessionID == "" {
+		return resolveConvergedSessionID(seed)
+	}
+	return deriveStableUUIDv4("sub2api:codex-client-session-id:v1:" + seed + ":" + clientSessionID)
+}
+
 // resolveConvergedSessionID 返回账号级恒定的 session_id。
 func resolveConvergedSessionID(seed string) string {
 	if seed == "" {
@@ -293,6 +306,11 @@ type codexFingerprintIDs struct {
 	parentThreadID string
 	subagentKind   string
 	threadSource   string
+	// isRootTurn 表示本请求是该会话的首个 turn（root 形态）。
+	// 真实 Codex 的 root turn 不带 x-openai-subagent，thread_id 等于 session_id，
+	// thread metadata 的 thread_source 是 "user"；只有真正 spawn 出来的并行
+	// 子代理才带 collab_spawn + parent_thread_id + thread_source="subagent"。
+	isRootTurn bool
 }
 
 // resolveCodexFingerprintIDs 按收敛模式计算出站 ID 集合。
@@ -342,13 +360,29 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 		return ids
 
 	case codexFingerprintSubagent:
-		ids.sessionID = resolveConvergedSessionID(seed)
-		ids.parentThreadID = resolveConvergedRootThreadID(seed)
-		ids.threadID = resolveConvergedSubagentThreadIDForSlot(seed, clientSessionID, nextCodexSubagentSlot())
+		// 每个客户端会话收敛成一个 session；root turn 的 thread_id 等于 session_id，
+		// 与该会话中并发的兄弟 turn 才另派生线程。
+		//
+		// 依据 codex-rs：
+		//   - session/session.rs:1007 "session_id is equal to the root thread's ID"
+		//   - config/mod.rs:282 单会话并发线程上限 4（含 root，故兄弟至多 3 个）
+		//   - responses_metadata.rs:485 root 不带 x-openai-subagent，thread_source 为 user
+		ids.sessionID = resolveConvergedSessionIDForClient(seed, clientSessionID)
 		ids.turnID = uuid.Must(uuid.NewV7()).String()
+		// 有客户端会话标识即为该会话的 root turn：客户端自己会复用同一 session
+		// 连发多个 turn，与真实 CLI 一致。只有网关凭空合成的并发没有身份，
+		// 才会落到该会话的兄弟线程槽位上。
+		ids.isRootTurn = clientSessionID != ""
+		if ids.isRootTurn {
+			ids.threadID = ids.sessionID
+			ids.threadSource = openAICodexThreadSourceUser
+		} else {
+			ids.parentThreadID = ids.sessionID
+			ids.threadID = resolveConvergedSubagentThreadIDForSlot(seed, clientSessionID, nextCodexSubagentSlot())
+			ids.subagentKind = openAICodexSubagentKindThreadSpawn
+			ids.threadSource = openAICodexThreadSourceSubagent
+		}
 		ids.windowID = codexWindowID(ids.threadID, ids.windowNumber)
-		ids.subagentKind = openAICodexSubagentKindThreadSpawn
-		ids.threadSource = openAICodexThreadSourceSubagent
 		return ids
 	}
 
@@ -431,7 +465,9 @@ func resolveConvergedSubagentThreadIDForSlot(seed, clientSessionID string, slot 
 	if clientSessionID != "" {
 		return deriveStableUUIDv4("sub2api:codex-subagent-thread-id:v1:" + seed + ":" + clientSessionID)
 	}
-	return deriveStableUUIDv4(fmt.Sprintf("sub2api:codex-subagent-thread-slot:v1:%s:%d", seed, slot%codexSubagentThreadsPerSession))
+	// root 占掉 1 个窗口槽位，兄弟线程只能用剩下的 3 个。
+	return deriveStableUUIDv4(fmt.Sprintf("sub2api:codex-subagent-thread-slot:v1:%s:%d",
+		seed, slot%(codexSubagentThreadsPerSession-1)))
 }
 
 // extractClientSessionID 从请求头中提取客户端原始的会话标识。
@@ -508,19 +544,30 @@ func applyCodexFingerprintHeaders(h http.Header, ids *codexFingerprintIDs) {
 		"turn_started_at_unix_ms": ids.turnStartedAtUnixMs,
 	}
 	if ids.mode == codexFingerprintSubagent {
-		// 让每个并发请求都声明成同一个会话派生出的子代理线程。真实 Codex 的
-		// 子代理请求同时携带 x-openai-subagent 与 x-codex-parent-thread-id，
-		// 并在 turn metadata 里写 thread_source / subagent_kind / parent_thread_id。
-		h.Set(openAICodexSubagentHeader, openAICodexSubagentThreadSpawnValue)
-		if ids.parentThreadID != "" {
-			h.Set(openAICodexParentThreadIDHeader, ids.parentThreadID)
-			fields["parent_thread_id"] = ids.parentThreadID
+		// 只有兄弟 turn 才自称子代理：真实 Codex 的 root turn 不带
+		// x-openai-subagent 与 parent_thread-id，thread_source 是 user
+		// （responses_metadata.rs:485、tui/app_server_session.rs:2966）。
+		if !ids.isRootTurn {
+			h.Set(openAICodexSubagentHeader, openAICodexSubagentThreadSpawnValue)
+			if ids.parentThreadID != "" {
+				h.Set(openAICodexParentThreadIDHeader, ids.parentThreadID)
+				fields["parent_thread_id"] = ids.parentThreadID
+			}
+			if ids.subagentKind != "" {
+				fields["subagent_kind"] = ids.subagentKind
+			}
+		} else {
+			// 防御：从另一账号/模式切过来时可能残留子代理头。
+			h.Del(openAICodexSubagentHeader)
+			h.Del(openAICodexParentThreadIDHeader)
 		}
 		if ids.threadSource != "" {
 			fields["thread_source"] = ids.threadSource
 		}
-		if ids.subagentKind != "" {
-			fields["subagent_kind"] = ids.subagentKind
+		// sandbox_mode 由客户端每次 turn 必写（sandbox_tags.rs:50），收敛模式下
+		// 客户端若没带则补齐，避免出站稳定缺一个字段。
+		if _, exists := fields["sandbox_mode"]; !exists {
+			fields["sandbox_mode"] = openAICodexSandboxModeWorkspaceWrite
 		}
 	}
 	// 真实 Codex 的每次 turn 都显式声明 request_kind=turn（见 codex-rs
@@ -617,18 +664,26 @@ func applyCodexFingerprintToClientMetadataMap(existing map[string]any, ids *code
 		"turn_started_at_unix_ms": ids.turnStartedAtUnixMs,
 	}
 	if ids.mode == codexFingerprintSubagent {
-		// 与出站头保持同一份子代理身份：flat client_metadata 与内嵌
-		// x-codex-turn-metadata 都必须声明同一个父线程与子代理类型。
-		existing[openAICodexSubagentHeader] = openAICodexSubagentThreadSpawnValue
-		if ids.parentThreadID != "" {
-			existing[openAICodexParentThreadIDHeader] = ids.parentThreadID
-			fields["parent_thread_id"] = ids.parentThreadID
+		// 与出站头保持同一份身份：flat client_metadata 与内嵌 x-codex-turn-metadata
+		// 必须一致。root turn 不带子代理字段，兄弟 turn 才带父线程与子代理类型。
+		if !ids.isRootTurn {
+			existing[openAICodexSubagentHeader] = openAICodexSubagentThreadSpawnValue
+			if ids.parentThreadID != "" {
+				existing[openAICodexParentThreadIDHeader] = ids.parentThreadID
+				fields["parent_thread_id"] = ids.parentThreadID
+			}
+			if ids.subagentKind != "" {
+				fields["subagent_kind"] = ids.subagentKind
+			}
+		} else {
+			delete(existing, openAICodexSubagentHeader)
+			delete(existing, openAICodexParentThreadIDHeader)
 		}
 		if ids.threadSource != "" {
 			fields["thread_source"] = ids.threadSource
 		}
-		if ids.subagentKind != "" {
-			fields["subagent_kind"] = ids.subagentKind
+		if _, exists := fields["sandbox_mode"]; !exists {
+			fields["sandbox_mode"] = openAICodexSandboxModeWorkspaceWrite
 		}
 	}
 	rewriteClientMetadataEmbeddedTurnMetadata(existing, fields)

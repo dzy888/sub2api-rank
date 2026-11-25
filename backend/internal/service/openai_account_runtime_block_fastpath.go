@@ -12,11 +12,14 @@ import (
 )
 
 const (
-	openAIAccountStateUpdateTimeout       = 5 * time.Second
-	openAIOAuth429FallbackCooldown        = 5 * time.Second
-	openAIOAuth429RetryWindow             = 2 * time.Minute
-	openAIOAuth429RetryDelay              = 500 * time.Millisecond
-	openAIOAuth429MaxRetryDelay           = 8 * time.Second
+	openAIAccountStateUpdateTimeout = 5 * time.Second
+	openAIOAuth429FallbackCooldown  = 5 * time.Second
+	openAIOAuth429RetryWindow       = 2 * time.Minute
+	// 与 codex-rs 一致：流式 429 走 BaseBackoff，基准 200ms、指数翻倍、
+	// jitter 0.9~1.1；上游给 retry-after 时优先采信（protocol/error.rs ServerDirected）。
+	// 上限取 3.2s，与源码 5 次重试（200/400/800/1.6/3.2s）的末次量级一致。
+	openAIOAuth429RetryDelay              = 200 * time.Millisecond
+	openAIOAuth429MaxRetryDelay           = 3200 * time.Millisecond
 	openAIOAuth429MaxAccountAttempts      = 3
 	openAIStopSchedulingBridgeCooldown    = 2 * time.Minute
 	openAIOAuth429StormWindow             = 10 * time.Second

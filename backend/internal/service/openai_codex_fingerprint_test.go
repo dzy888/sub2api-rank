@@ -937,7 +937,7 @@ func TestApplyCodexFingerprintClientMetadataRaw_NonObjectBodyUntouched(t *testin
 func TestResolveCodexFingerprintIDs_SubagentMode(t *testing.T) {
 	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "subagent"})
 	require.Equal(t, codexFingerprintSubagent, account.GetCodexFingerprintMode())
-	seed, ok := codexFingerprintSeed(account.Extra)
+	_, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
 
 	headers := func(session string) http.Header {
@@ -948,59 +948,80 @@ func TestResolveCodexFingerprintIDs_SubagentMode(t *testing.T) {
 		return h
 	}
 
-	// 同一客户端会话 → 同一会话、同一父线程、同一子线程。
+	// 有客户端会话标识 → 该会话的 root turn：thread_id 等于 session_id。
+	// 依据 codex-rs session/session.rs:1007。
 	a := resolveCodexFingerprintIDsFromRequest(account, headers("cli-1"))
 	b := resolveCodexFingerprintIDsFromRequest(account, headers("cli-1"))
 	require.NotNil(t, a)
-	require.Equal(t, a.sessionID, b.sessionID)
-	require.Equal(t, a.parentThreadID, b.parentThreadID)
-	require.Equal(t, a.threadID, b.threadID)
+	require.True(t, a.isRootTurn)
+	require.Equal(t, a.sessionID, a.threadID, "root turn 的 thread_id 等于 session_id")
+	require.Empty(t, a.parentThreadID, "root turn 没有父线程")
+	require.Equal(t, a.sessionID, b.sessionID, "同一客户端会话复用同一 session")
 	require.NotEqual(t, a.turnID, b.turnID, "每个 turn 必须有自己的 turn_id")
-	require.Equal(t, resolveConvergedSessionID(seed), a.sessionID, "所有并发共享同一会话")
-	require.Equal(t, resolveConvergedRootThreadID(seed), a.parentThreadID, "父线程是账号级恒定值")
 
-	// 不同客户端会话 → 同会话同父线程，但子线程不同。
+	// 不同客户端会话 → 各自独立的 session。
 	c := resolveCodexFingerprintIDsFromRequest(account, headers("cli-2"))
-	require.Equal(t, a.sessionID, c.sessionID)
-	require.Equal(t, a.parentThreadID, c.parentThreadID)
-	require.NotEqual(t, a.threadID, c.threadID, "不同客户端会话是不同的子代理线程")
+	require.NotEqual(t, a.sessionID, c.sessionID, "不同客户端会话是不同的上游会话")
+	require.Equal(t, c.sessionID, c.threadID)
 
 	// 无客户端身份（网关自行合成的并发）→ 摊到固定的子线程集合上，
 	// 数量不超过真实 Codex 的单会话上限，否则会话下线程数会失控。
 	seen := map[string]bool{}
 	seenSession := map[string]bool{}
+	sawSibling := false
 	for i := 0; i < 40; i++ {
 		ids := resolveCodexFingerprintIDsFromRequest(account, headers(""))
 		seen[ids.threadID] = true
 		seenSession[ids.sessionID] = true
+		require.False(t, ids.isRootTurn, "无身份请求是会话派生的兄弟 turn")
+		require.Equal(t, ids.sessionID, ids.parentThreadID, "父线程就是该会话的 root 线程")
+		if !ids.isRootTurn {
+			sawSibling = true
+		}
 	}
 	require.Len(t, seenSession, 1, "所有并发仍属同一会话")
-	require.LessOrEqual(t, len(seen), codexSubagentThreadsPerSession,
-		"单会话线程数不得超过真实客户端上限")
-	require.Greater(t, len(seen), 1, "无身份时不能全部挤在单一线程上")
+	require.LessOrEqual(t, len(seen), codexSubagentThreadsPerSession-1,
+		"兄弟线程数不得超过真实客户端的子代理上限（root + 兄弟 = 4）")
+	require.True(t, sawSibling)
 }
 
 func TestApplyCodexFingerprintHeaders_SubagentMode(t *testing.T) {
 	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "subagent"})
 	h := http.Header{}
 	h.Set("x-codex-turn-metadata", `{"installation_id":"x","session_id":"x","thread_id":"x","turn_id":"x","window_id":"x:0","sandbox":"seatbelt"}`)
-	ids := resolveCodexFingerprintIDs(account, "cli-1", codexFingerprintSubagent)
-	require.NotNil(t, ids)
-	applyCodexFingerprintHeaders(h, ids)
+	// root turn（有客户端会话标识）：thread 等于 session，不带子代理标记，
+	// thread_source 为 user。依据 codex-rs responses_metadata.rs:485。
+	rootIDs := resolveCodexFingerprintIDs(account, "cli-1", codexFingerprintSubagent)
+	require.NotNil(t, rootIDs)
+	require.True(t, rootIDs.isRootTurn)
+	applyCodexFingerprintHeaders(h, rootIDs)
 
-	assert.Equal(t, ids.sessionID, h.Get("session-id"))
-	assert.Equal(t, ids.sessionID, h.Get("session_id"))
-	assert.Equal(t, ids.threadID, h.Get("thread-id"))
-	assert.Equal(t, ids.threadID, h.Get("x-client-request-id"))
-	assert.Equal(t, ids.threadID+":0", h.Get("x-codex-window-id"))
-	assert.Equal(t, openAICodexSubagentThreadSpawnValue, h.Get(openAICodexSubagentHeader))
-	assert.Equal(t, ids.parentThreadID, h.Get(openAICodexParentThreadIDHeader))
+	assert.Equal(t, rootIDs.sessionID, h.Get("session-id"))
+	assert.Equal(t, rootIDs.sessionID, h.Get("session_id"))
+	assert.Equal(t, rootIDs.sessionID, h.Get("thread-id"))
+	assert.Equal(t, rootIDs.sessionID, h.Get("x-client-request-id"))
+	assert.Equal(t, rootIDs.sessionID+":0", h.Get("x-codex-window-id"))
+	assert.Empty(t, h.Get(openAICodexSubagentHeader), "root turn 不带 x-openai-subagent")
+	assert.Empty(t, h.Get(openAICodexParentThreadIDHeader), "root turn 没有父线程")
 
-	turnMetadata := h.Get("x-codex-turn-metadata")
-	assert.Contains(t, turnMetadata, `"thread_source":"subagent"`)
-	assert.Contains(t, turnMetadata, `"subagent_kind":"thread_spawn"`)
-	assert.Contains(t, turnMetadata, ids.parentThreadID)
-	assert.Contains(t, turnMetadata, `"sandbox":"seatbelt"`, "未指定字段必须保留")
+	rootMetadata := h.Get("x-codex-turn-metadata")
+	assert.Contains(t, rootMetadata, `"thread_source":"user"`)
+	assert.NotContains(t, rootMetadata, `"subagent_kind"`)
+	assert.Contains(t, rootMetadata, `"sandbox_mode":"workspace-write"`)
+	assert.Contains(t, rootMetadata, `"sandbox":"seatbelt"`, "未指定字段必须保留")
+
+	// 兄弟 turn（网关合成的并发）：thread 独立，带 collab_spawn 与父线程。
+	sibling := resolveCodexFingerprintIDs(account, "", codexFingerprintSubagent)
+	require.NotNil(t, sibling)
+	require.False(t, sibling.isRootTurn)
+	sh := http.Header{}
+	applyCodexFingerprintHeaders(sh, sibling)
+	assert.Equal(t, openAICodexSubagentThreadSpawnValue, sh.Get(openAICodexSubagentHeader))
+	assert.Equal(t, sibling.sessionID, sh.Get(openAICodexParentThreadIDHeader), "父线程就是该会话的 root")
+	assert.NotEqual(t, sibling.sessionID, sh.Get("thread-id"), "兄弟 turn 有独立线程")
+	siblingMetadata := sh.Get("x-codex-turn-metadata")
+	assert.Contains(t, siblingMetadata, `"thread_source":"subagent"`)
+	assert.Contains(t, siblingMetadata, `"subagent_kind":"thread_spawn"`)
 }
 
 func TestApplyCodexFingerprintClientMetadata_SubagentMode(t *testing.T) {
@@ -1018,11 +1039,24 @@ func TestApplyCodexFingerprintClientMetadata_SubagentMode(t *testing.T) {
 	metadata := body["client_metadata"].(map[string]any)
 	assert.Equal(t, ids.sessionID, metadata["session_id"])
 	assert.Equal(t, ids.threadID, metadata["thread_id"])
-	assert.Equal(t, ids.parentThreadID, metadata[openAICodexParentThreadIDHeader])
-	assert.Equal(t, openAICodexSubagentThreadSpawnValue, metadata[openAICodexSubagentHeader])
+	// root turn 的体侧也不带子代理字段。
+	assert.NotContains(t, metadata, openAICodexSubagentHeader)
+	assert.NotContains(t, metadata, openAICodexParentThreadIDHeader)
 	embedded := metadata["x-codex-turn-metadata"].(string)
-	assert.Contains(t, embedded, `"thread_source":"subagent"`)
-	assert.Contains(t, embedded, ids.parentThreadID)
+	assert.Contains(t, embedded, `"thread_source":"user"`)
+
+	// 兄弟 turn 才写父线程与子代理类型。
+	siblingBody := map[string]any{"client_metadata": map[string]any{
+		"session_id":            "client-session",
+		"x-codex-turn-metadata": `{"installation_id":"old"}`,
+	}}
+	sibling := resolveCodexFingerprintIDs(account, "", codexFingerprintSubagent)
+	require.NotNil(t, sibling)
+	require.True(t, applyCodexFingerprintClientMetadata(siblingBody, sibling))
+	siblingMeta := siblingBody["client_metadata"].(map[string]any)
+	assert.Equal(t, openAICodexSubagentThreadSpawnValue, siblingMeta[openAICodexSubagentHeader])
+	assert.Equal(t, sibling.sessionID, siblingMeta[openAICodexParentThreadIDHeader])
+	assert.Contains(t, siblingMeta["x-codex-turn-metadata"].(string), `"thread_source":"subagent"`)
 }
 
 func TestApplyCodexOutboundEnvelopeAlignsIdentityTriple(t *testing.T) {

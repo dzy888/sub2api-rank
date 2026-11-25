@@ -214,7 +214,7 @@ func TestOpenAIGatewayHandlerResponses_FailoverContinuesForConnectedClient(t *te
 		kind     string
 		accounts []int64
 	}{
-		{service.AccountTypeOAuth, []int64{1, 1, 1, 1}},
+		{service.AccountTypeOAuth, []int64{1, 1, 1, 1, 1, 1}},
 		{service.AccountTypeAPIKey, []int64{1, 2}},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {

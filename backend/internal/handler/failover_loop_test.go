@@ -39,12 +39,13 @@ func TestSameAccountRetryDelayFor(t *testing.T) {
 		retryCount int
 		want       time.Duration
 	}{
-		{name: "first retry", retryCount: 1, want: 500 * time.Millisecond},
-		{name: "second retry", retryCount: 2, want: time.Second},
-		{name: "third retry", retryCount: 3, want: 2 * time.Second},
-		{name: "fourth retry", retryCount: 4, want: 4 * time.Second},
-		{name: "fifth retry", retryCount: 5, want: 8 * time.Second},
-		{name: "capped retry", retryCount: 10, want: 8 * time.Second},
+		// 对齐 codex-rs 的 backoff：200ms 起、逐次翻倍，上限 3.2s。
+		{name: "first retry", retryCount: 1, want: 200 * time.Millisecond},
+		{name: "second retry", retryCount: 2, want: 400 * time.Millisecond},
+		{name: "third retry", retryCount: 3, want: 800 * time.Millisecond},
+		{name: "fourth retry", retryCount: 4, want: 1600 * time.Millisecond},
+		{name: "fifth retry", retryCount: 5, want: 3200 * time.Millisecond},
+		{name: "capped retry", retryCount: 10, want: 3200 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, sameAccountRetryDelayFor(capacityErr, tc.retryCount))
@@ -52,11 +53,11 @@ func TestSameAccountRetryDelayFor(t *testing.T) {
 	}
 
 	t.Run("non request scoped errors keep fixed delay", func(t *testing.T) {
-		require.Equal(t, 500*time.Millisecond, sameAccountRetryDelayFor(&service.UpstreamFailoverError{}, 10))
+		require.Equal(t, 200*time.Millisecond, sameAccountRetryDelayFor(&service.UpstreamFailoverError{}, 10))
 	})
 
 	t.Run("nil error keeps fixed delay", func(t *testing.T) {
-		require.Equal(t, 500*time.Millisecond, sameAccountRetryDelayFor(nil, 10))
+		require.Equal(t, 200*time.Millisecond, sameAccountRetryDelayFor(nil, 10))
 	})
 
 	t.Run("explicit oauth delay wins", func(t *testing.T) {
@@ -469,9 +470,9 @@ func TestHandleFailoverError_SameAccountRetry(t *testing.T) {
 		require.Equal(t, 0, fs.SwitchCount, "同账号重试不应增加切换计数")
 		require.NotContains(t, fs.FailedAccountIDs, int64(100), "同账号重试不应加入失败列表")
 		require.Empty(t, mock.calls, "同账号重试期间不应调用 TempUnschedule")
-		// 验证等待了 sameAccountRetryDelay (500ms)
-		require.GreaterOrEqual(t, elapsed, 400*time.Millisecond)
-		require.Less(t, elapsed, 2*time.Second)
+		// 验证等待了 sameAccountRetryDelay (200ms)
+		require.GreaterOrEqual(t, elapsed, 150*time.Millisecond)
+		require.Less(t, elapsed, time.Second)
 	})
 
 	t.Run("达到最大重试次数前均返回FailoverContinue", func(t *testing.T) {

@@ -253,6 +253,9 @@ const (
 	openAICodexSubagentHeader            = "x-openai-subagent"
 	openAICodexSubagentThreadSpawnValue  = "collab_spawn"
 	openAICodexThreadSourceSubagent      = "subagent"
+	openAICodexThreadSourceUser          = "user"
+	// 沙箱档位取值来自 codex-rs core/src/sandbox_tags.rs:95，每次 turn 必带。
+	openAICodexSandboxModeWorkspaceWrite = "workspace-write"
 	openAICodexSubagentKindThreadSpawn   = "thread_spawn"
 	openAICodexRequestKindTurn           = "turn"
 	openAICodexWindowIDSuffix            = ":0"

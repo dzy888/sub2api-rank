@@ -204,7 +204,7 @@ func TestOAuthRetryOwnerBusyAfterSlotRelease(t *testing.T) {
 					want = []int64{1, 1}
 					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				} else if scenario == "exhausted" {
-					want = []int64{1, 1, 1, 1}
+					want = []int64{1, 1, 1, 1, 1, 1}
 					require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
 				}
 				require.Equal(t, want, upstream.ids, "B must receive zero sends, including with no switch budget")
