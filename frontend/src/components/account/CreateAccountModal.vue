@@ -3269,7 +3269,8 @@
         </div>
         <OpenAIProxySettings v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
           v-model:mode="openaiProxyMode" v-model:session-affinity="openaiProxySessionAffinity"
-          v-model:session-max-concurrency="openaiSessionMaxConcurrency"
+          :session-max-concurrency="openaiSessionMaxConcurrency" @update:session-max-concurrency="onSessionLimitChange"
+          :session-slot-count="openaiSessionSlotCount" @update:session-slot-count="onSessionSlotCountChange"
           v-model:single-proxy-id="form.proxy_id" v-model:proxy-ids="openaiProxyIds"
           :proxies="proxies" :loading="proxiesLoading" :load-error="proxiesLoadError"
           :user-id="authStore.user?.id" @retry="emit('retry-proxies')" />
@@ -3289,7 +3290,7 @@
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
           <input v-model.number="form.concurrency" type="number" min="1" class="input"
-            @input="form.concurrency = Math.max(1, form.concurrency || 1)" />
+            @input="onConcurrencyManualInput()" />
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -4711,6 +4712,32 @@ const openaiProxyMode = ref<'single' | 'request'>('single')
 const openaiProxyIds = ref<number[]>([])
 const openaiProxySessionAffinity = ref(false)
 const openaiSessionMaxConcurrency = ref<number | null>(null)
+const openaiSessionSlotCount = ref<number | null>(null)
+// 会话数 / 单会话上限 / 账号并发三者联动：改前两者即按乘积回填并发，
+// 手改并发则停止自动推导（handEditedConcurrency）。
+const handEditedConcurrency = ref(false)
+const syncSessionBudget = () => {
+  if (handEditedConcurrency.value) return
+  const limit = openaiSessionMaxConcurrency.value ?? 0
+  const slots = openaiSessionSlotCount.value ?? 0
+  if (limit > 0 && slots > 0) form.concurrency = limit * slots
+}
+const onConcurrencyManualInput = () => {
+  form.concurrency = Math.max(1, form.concurrency || 1)
+  const limit = openaiSessionMaxConcurrency.value ?? 0
+  const slots = openaiSessionSlotCount.value ?? 0
+  handEditedConcurrency.value = form.concurrency !== limit * slots
+}
+const onSessionLimitChange = (value: number | null) => {
+  openaiSessionMaxConcurrency.value = value
+  handEditedConcurrency.value = false
+  syncSessionBudget()
+}
+const onSessionSlotCountChange = (value: number | null) => {
+  openaiSessionSlotCount.value = value
+  handEditedConcurrency.value = false
+  syncSessionBudget()
+}
 const openaiAuthorizationProxy = ref<{
   sessionId: string
   mode: 'single' | 'request'
@@ -6158,6 +6185,8 @@ const resetForm = () => {
   openaiProxyMode.value = 'single'
   openaiProxySessionAffinity.value = false
   openaiSessionMaxConcurrency.value = null
+  openaiSessionSlotCount.value = null
+  handEditedConcurrency.value = false
   openaiProxyIds.value = []
   openaiAuthorizationProxy.value = null
   autoBPS.reset()
@@ -6329,6 +6358,9 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
     if (openaiSessionMaxConcurrency.value) {
       extra.openai_session_max_concurrency = openaiSessionMaxConcurrency.value
     }
+    if (openaiSessionSlotCount.value) {
+      extra.openai_session_slot_count = openaiSessionSlotCount.value
+    }
     extra.openai_oauth_responses_websockets_v2_mode = openaiOAuthResponsesWebSocketV2Mode.value
     extra.openai_oauth_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(openaiOAuthResponsesWebSocketV2Mode.value)
     applyAccountRPMSettings(extra, {
@@ -6436,6 +6468,7 @@ const buildOpenAICodexImportExtra = (supportsProxyGroup = true): Record<string, 
     delete extra.openai_proxy_ids
     delete extra.openai_request_proxy_session_affinity
     delete extra.openai_session_max_concurrency
+    delete extra.openai_session_slot_count
   }
   return Object.keys(extra).length > 0 ? extra : undefined
 }

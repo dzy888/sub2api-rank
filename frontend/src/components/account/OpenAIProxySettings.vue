@@ -40,6 +40,20 @@
           @input="emit('update:sessionMaxConcurrency', normalizeLimit(($event.target as HTMLInputElement).value))" />
       </div>
     </div>
+    <div class="flex items-center justify-between gap-4">
+      <div class="min-w-0">
+        <label class="input-label mb-0">{{ t('admin.accounts.openai.proxySessionSlotCount') }}</label>
+        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.proxySessionSlotCountHint') }}</p>
+      </div>
+      <div class="w-32 flex-shrink-0">
+        <input :value="sessionSlotCount" data-testid="openai-proxy-session-slot-count"
+          type="number" min="0" step="1" class="input" :placeholder="t('admin.accounts.openai.proxySessionMaxConcurrencyOff')"
+          @input="emit('update:sessionSlotCount', normalizeLimit(($event.target as HTMLInputElement).value))" />
+      </div>
+    </div>
+    <p v-if="sessionConcurrencyBudget > 0" class="text-xs text-gray-600 dark:text-gray-400" data-testid="openai-proxy-session-budget">
+      {{ t('admin.accounts.openai.proxySessionBudgetPreview', { budget: sessionConcurrencyBudget }) }}
+    </p>
     <BPSProxyRoutingSettings v-if="mode === 'request'" mode="request" embedded :proxy-ids="proxyIds" :proxies="proxies"
       :loading="loading" :load-error="loadError" :current-account-id="currentAccountId" :user-id="userId"
       @update:proxy-ids="emit('update:proxyIds', $event)" @retry="emit('retry')" />
@@ -47,7 +61,7 @@
 </template>
 
 <script setup lang="ts">
-import { useId } from 'vue'
+import { computed, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { Proxy } from '@/types'
 import ProxySelector from '@/components/common/ProxySelector.vue'
@@ -55,10 +69,11 @@ import BPSProxyRoutingSettings from './BPSProxyRoutingSettings.vue'
 import NewFeatureBadge from '@/components/common/NewFeatureBadge.vue'
 import { NEW_FEATURE_NOTICES } from '@/constants/newFeatureNotices'
 
-defineProps<{
+const props = defineProps<{
   mode: 'single' | 'request'
   sessionAffinity?: boolean
   sessionMaxConcurrency?: number | null
+  sessionSlotCount?: number | null
   singleProxyId: number | null
   proxyIds: number[]
   proxies: Proxy[]
@@ -71,11 +86,18 @@ const emit = defineEmits<{
   'update:mode': [value: 'single' | 'request']
   'update:sessionAffinity': [value: boolean]
   'update:sessionMaxConcurrency': [value: number | null]
+  'update:sessionSlotCount': [value: number | null]
   'update:singleProxyId': [value: number | null]
   'update:proxyIds': [value: number[]]
   retry: []
 }>()
 const { t } = useI18n()
+// 账号总并发由「会话数 × 单会话上限」推导；两者都填才展示。
+const sessionConcurrencyBudget = computed(() => {
+  const limit = props.sessionMaxConcurrency ?? 0
+  const slots = props.sessionSlotCount ?? 0
+  return limit > 0 && slots > 0 ? limit * slots : 0
+})
 // 0 / 空表示不限；后端把非正数当不限，这里统一收敛成 null 便于回显。
 const normalizeLimit = (raw: string): number | null => {
   const value = Number.parseInt(raw, 10)

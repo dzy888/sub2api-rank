@@ -10,6 +10,7 @@ import (
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -324,4 +325,62 @@ func TestAdminSessionMaxConcurrencyValidation(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	require.Equal(t, 12, repo.account.OpenAISessionMaxConcurrency())
+}
+
+func TestOpenAISessionConcurrencyBudgetDerivation(t *testing.T) {
+	account := func(limit, slots any) *Account {
+		a := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 99}
+		extra := map[string]any{}
+		if limit != nil {
+			extra[OpenAISessionMaxConcurrencyKey] = limit
+		}
+		if slots != nil {
+			extra[OpenAISessionSlotCountKey] = slots
+		}
+		if len(extra) > 0 {
+			a.Extra = extra
+		}
+		return a
+	}
+
+	// 两个值都配才会推导。
+	noLimit := account(nil, 10)
+	applyOpenAISessionConcurrencyBudget(noLimit, nil)
+	assert.Equal(t, 99, noLimit.Concurrency)
+
+	noSlots := account(4, nil)
+	applyOpenAISessionConcurrencyBudget(noSlots, nil)
+	assert.Equal(t, 99, noSlots.Concurrency)
+
+	derived := account(4, 10)
+	applyOpenAISessionConcurrencyBudget(derived, nil)
+	assert.Equal(t, 40, derived.Concurrency)
+
+	// 显式并发优先。
+	explicit := account(4, 10)
+	forced := 7
+	applyOpenAISessionConcurrencyBudget(explicit, &forced)
+	assert.Equal(t, 99, explicit.Concurrency, "显式并发已由调用方写入，推导不再覆盖")
+}
+
+func TestOpenAISessionSlotCountParsing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  any
+		want int
+	}{
+		{"absent", nil, 0},
+		{"int", 6, 6},
+		{"float64 from json", float64(8), 8},
+		{"zero", 0, 0},
+		{"negative", -1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{}}
+			if tc.raw != nil {
+				account.Extra[OpenAISessionSlotCountKey] = tc.raw
+			}
+			require.Equal(t, tc.want, account.OpenAISessionSlotCount())
+		})
+	}
 }

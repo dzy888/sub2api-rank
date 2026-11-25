@@ -2079,7 +2079,8 @@
         </div>
         <OpenAIProxySettings v-if="openaiProxySupported"
           v-model:mode="openaiProxyMode" v-model:session-affinity="openaiProxySessionAffinity"
-          v-model:session-max-concurrency="openaiSessionMaxConcurrency"
+          :session-max-concurrency="openaiSessionMaxConcurrency" @update:session-max-concurrency="onSessionLimitChange"
+          :session-slot-count="openaiSessionSlotCount" @update:session-slot-count="onSessionSlotCountChange"
           v-model:single-proxy-id="form.proxy_id" v-model:proxy-ids="openaiProxyIds"
           :proxies="proxies" :loading="proxiesLoading" :load-error="proxiesLoadError" :current-account-id="editingAccount.id"
           :user-id="authStore.user?.id" @retry="emit('retry-proxies')" />
@@ -2096,7 +2097,7 @@
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
           <input v-model.number="form.concurrency" type="number" min="1" class="input"
-            @input="form.concurrency = Math.max(1, form.concurrency || 1)" />
+            @input="onConcurrencyManualInput()" />
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -4758,6 +4759,32 @@ const openaiProxyMode = ref<'single' | 'request'>('single')
 const openaiProxyIds = ref<number[]>([])
 const openaiProxySessionAffinity = ref(false)
 const openaiSessionMaxConcurrency = ref<number | null>(null)
+const openaiSessionSlotCount = ref<number | null>(null)
+// 会话数 / 单会话上限 / 账号并发三者联动：改前两者即按乘积回填并发，
+// 手改并发则停止自动推导（handEditedConcurrency）。
+const handEditedConcurrency = ref(false)
+const syncSessionBudget = () => {
+  if (handEditedConcurrency.value) return
+  const limit = openaiSessionMaxConcurrency.value ?? 0
+  const slots = openaiSessionSlotCount.value ?? 0
+  if (limit > 0 && slots > 0) form.concurrency = limit * slots
+}
+const onConcurrencyManualInput = () => {
+  form.concurrency = Math.max(1, form.concurrency || 1)
+  const limit = openaiSessionMaxConcurrency.value ?? 0
+  const slots = openaiSessionSlotCount.value ?? 0
+  handEditedConcurrency.value = form.concurrency !== limit * slots
+}
+const onSessionLimitChange = (value: number | null) => {
+  openaiSessionMaxConcurrency.value = value
+  handEditedConcurrency.value = false
+  syncSessionBudget()
+}
+const onSessionSlotCountChange = (value: number | null) => {
+  openaiSessionSlotCount.value = value
+  handEditedConcurrency.value = false
+  syncSessionBudget()
+}
 const excelBPSCacheCreationAsInput = ref(false)
 const excelBPSAutoDisableOn403 = ref(false)
 const excelBPSAutoRecoverOn403 = ref(false)
@@ -5376,6 +5403,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   openaiProxyMode.value = 'single'
   openaiProxySessionAffinity.value = false
   openaiSessionMaxConcurrency.value = null
+  openaiSessionSlotCount.value = null
+  handEditedConcurrency.value = false
   openaiProxyIds.value = []
   excelBPSCacheCreationAsInput.value = false
   excelBPSAutoDisableOn403.value = false
@@ -5440,6 +5469,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     openaiProxySessionAffinity.value = extra?.openai_request_proxy_session_affinity === true
     const limit = extra?.openai_session_max_concurrency
     openaiSessionMaxConcurrency.value = typeof limit === 'number' && limit > 0 ? limit : null
+    const slots = extra?.openai_session_slot_count
+    openaiSessionSlotCount.value = typeof slots === 'number' && slots > 0 ? slots : null
     const configuredProxyIds = hasUnifiedProxyMode ? extra?.openai_proxy_ids : extra?.openai_excel_bps_proxy_ids
     openaiProxyIds.value = Array.isArray(configuredProxyIds)
       ? [...new Set(configuredProxyIds.filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0))]
@@ -7245,11 +7276,17 @@ const handleSubmit = async () => {
         } else {
           delete newExtra.openai_session_max_concurrency
         }
+        if (openaiSessionSlotCount.value) {
+          newExtra.openai_session_slot_count = openaiSessionSlotCount.value
+        } else {
+          delete newExtra.openai_session_slot_count
+        }
       } else {
         delete newExtra.openai_proxy_mode
         delete newExtra.openai_proxy_ids
         delete newExtra.openai_request_proxy_session_affinity
         delete newExtra.openai_session_max_concurrency
+        delete newExtra.openai_session_slot_count
       }
       if (newExtra.openai_excel_bps === true && excelBPSCacheCreationAsInput.value) {
         newExtra.openai_excel_bps_cache_creation_as_input = true

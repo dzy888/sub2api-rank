@@ -17,8 +17,11 @@ const (
 	// 上游对同一 session 有路由级并发配额（route_rate_limit_exceeded，实测约 26），
 	// 收敛成少量会话后必须靠它把并发压在配额内，否则会触发重试退避。
 	OpenAISessionMaxConcurrencyKey = "openai_session_max_concurrency"
-	OpenAIProxyModeSingle          = "single"
-	OpenAIProxyModeRequest         = "request"
+	// OpenAISessionSlotCountKey 是预期的并发会话数，只用于推导账号总并发
+	// （会话数 × 单会话上限）。0/缺省表示不推导，账号并发沿用原值。
+	OpenAISessionSlotCountKey = "openai_session_slot_count"
+	OpenAIProxyModeSingle     = "single"
+	OpenAIProxyModeRequest    = "request"
 )
 
 func (a *Account) supportsOpenAIRequestProxies() bool {
@@ -86,6 +89,55 @@ func (a *Account) OpenAISessionMaxConcurrency() int {
 	return 0
 }
 
+// OpenAISessionSlotCount 返回预期的并发会话数，未配置时为 0。
+func (a *Account) OpenAISessionSlotCount() int {
+	if a == nil {
+		return 0
+	}
+	switch raw := a.Extra[OpenAISessionSlotCountKey].(type) {
+	case int:
+		if raw > 0 {
+			return raw
+		}
+	case int64:
+		if raw > 0 {
+			return int(raw)
+		}
+	case float64:
+		if raw > 0 {
+			return int(raw)
+		}
+	}
+	return 0
+}
+
+// openAISessionConcurrencyBudget 返回「会话数 × 单会话上限」能支撑的总并发。
+// 两者任一未配置时返回 0，表示不接管账号并发。
+func (a *Account) openAISessionConcurrencyBudget() int {
+	limit := a.OpenAISessionMaxConcurrency()
+	slots := a.OpenAISessionSlotCount()
+	if limit <= 0 || slots <= 0 {
+		return 0
+	}
+	return limit * slots
+}
+
+// applyOpenAISessionConcurrencyBudget 在只配置了单会话上限时推导账号并发。
+// 显式填写的账号并发总是优先，管理员可用它覆盖推导值。
+func applyOpenAISessionConcurrencyBudget(account *Account, explicitConcurrency *int) {
+	if account == nil {
+		return
+	}
+	if explicitConcurrency != nil {
+		return
+	}
+	budget := account.openAISessionConcurrencyBudget()
+	if budget <= 0 {
+		return
+	}
+	account.Concurrency = normalizeAccountConcurrency(account.Platform, account.Type, budget)
+}
+
 func (a *Account) OpenAIRequestProxySessionAffinityEnabled() bool {
 	if a == nil || !a.OpenAIRequestProxyEnabled() {
 		return false
@@ -123,6 +175,28 @@ func (s *adminServiceImpl) validateOpenAIProxySettingsChange(ctx context.Context
 	rawMode, supplied := account.Extra[OpenAIProxyModeKey]
 	if supplied && rawMode != OpenAIProxyModeSingle && rawMode != OpenAIProxyModeRequest {
 		return infraerrors.BadRequest("INVALID_OPENAI_PROXY_MODE", "OpenAI proxy mode must be single or request")
+	}
+	if raw, exists := account.Extra[OpenAISessionSlotCountKey]; exists {
+		switch value := raw.(type) {
+		case int:
+			if value < 0 {
+				return infraerrors.BadRequest("INVALID_OPENAI_SESSION_SLOT_COUNT", "session count must not be negative")
+			}
+		case int64:
+			if value < 0 {
+				return infraerrors.BadRequest("INVALID_OPENAI_SESSION_SLOT_COUNT", "session count must not be negative")
+			}
+		case float64:
+			if value < 0 || value != float64(int(value)) {
+				return infraerrors.BadRequest("INVALID_OPENAI_SESSION_SLOT_COUNT", "session count must be a whole, non-negative number")
+			}
+		default:
+			return infraerrors.BadRequest("INVALID_OPENAI_SESSION_SLOT_COUNT", "session count must be a number")
+		}
+		if !account.supportsOpenAIRequestProxies() {
+			return infraerrors.BadRequest("OPENAI_SESSION_SLOT_COUNT_REQUIRES_OAUTH",
+				"session count requires an OpenAI OAuth account")
+		}
 	}
 	if raw, exists := account.Extra[OpenAISessionMaxConcurrencyKey]; exists {
 		switch value := raw.(type) {
