@@ -1096,7 +1096,6 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		// Skip excluded accounts
 		if _, excluded := excludedIDs[acc.ID]; excluded {
 			filterStats.exclude("excluded")
-			slog.Warn("openai.select_excluded_probe", "account_id", acc.ID, "model", requestedModel)
 			continue
 		}
 		if s.isExcelBPSModelCoolingDown(acc, requestedModel) {
