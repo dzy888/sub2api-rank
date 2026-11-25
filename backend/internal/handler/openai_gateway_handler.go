@@ -2878,7 +2878,6 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 			h.handleStreamingAwareErrorWithCode(c, status, errType, code, message, *streamStarted, false)
 		}
 	}
-	reqLog.Warn("openai.account_gate_entry", zap.String("session_hash", sessionHash))
 	if selection == nil || selection.Account == nil {
 		markOpsRoutingCapacityLimited(c)
 		writeError(http.StatusServiceUnavailable, "api_error", "", "No available accounts")
@@ -3071,8 +3070,6 @@ func (h *OpenAIGatewayHandler) acquireOpenAISessionSlot(c *gin.Context, account 
 		return nil, nil
 	}
 	limit := account.OpenAISessionMaxConcurrency()
-	reqLog.Warn("openai.session_gate_probe", zap.Int64("account_id", account.ID),
-		zap.Int("limit", limit), zap.String("session_hash", sessionHash))
 	if limit <= 0 || strings.TrimSpace(sessionHash) == "" {
 		return nil, nil
 	}
