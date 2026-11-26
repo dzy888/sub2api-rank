@@ -341,6 +341,17 @@ func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context
 	if disposition == openAIOAuth429Transient && s.openAIOAuth429RetryWindowActive(account) {
 		return
 	}
+	// 非默认 limit_id 家族耗尽时，冷却由 handle429Cooldown 落到具体模型上。
+	// 这里再阻塞整号，会让同账号上仍然有额度的模型一起停摆。
+	// coolExhaustedCodexFamily 若判定不出可归属的模型会返回 false，
+	// 随后 handle429Cooldown 仍会走整号兜底，因此这里提前返回不会失去保护。
+	// 注意不要 Delete retry 窗口：窗口由 ShouldRetryOpenAIOAuth429 的 LoadOrStore
+	// 懒创建，删除会让 handle429 立刻重建并再次早退，模型级冷却永远落不了地。
+	// 保留原来的 startedAt 时窗口会按原定 2 分钟自然过期。
+	if disposition == openAIOAuth429Transient &&
+		hasNonDefaultExhaustedCodexFamily(ParseCodexRateLimitHeaders(headers), time.Now()) {
+		return
+	}
 
 	now := time.Now()
 	cooldownUntil := now.Add(openAIOAuth429FallbackCooldown)

@@ -1087,6 +1087,13 @@ func ParseCodexRateLimitHeaders(headers http.Header) *OpenAICodexUsageSnapshot {
 		hasData = true
 	}
 
+	// 全部 limit_id 家族（对齐 codex parse_all_rate_limits）。
+	// 默认家族在这里也会出现一次（key 为 codex），与上面的裸 x-codex-* 字段同源。
+	if families := parseCodexLimitFamilies(headers); len(families) > 0 {
+		snapshot.Families = families
+		hasData = true
+	}
+
 	_, weeklyPresent, weeklyValid := openAI429WeeklyParsedHeaderUsage(headers, snapshot)
 	snapshot.invalidWeekly429 = weeklyPresent && !weeklyValid
 	if !hasData && !snapshot.invalidWeekly429 {
@@ -1158,6 +1165,12 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 	if snapshot.PrimaryOverSecondaryPercent != nil {
 		updates["codex_primary_over_secondary_percent"] = *snapshot.PrimaryOverSecondaryPercent
 	}
+	// 家族维度快照：用于排查「哪个 limit_id 在烧额度」。
+	// 非 window 字段，走 UpdateExtra 的 display 分支，不参与 5h/7d 版本合并。
+	if families := codexLimitFamiliesExtra(snapshot.Families); len(families) > 0 {
+		updates["openai_codex_families"] = families
+	}
+
 	updates["codex_usage_updated_at"] = baseTime.Format(time.RFC3339Nano)
 
 	// 归一化到 5h/7d 规范字段
@@ -1199,6 +1212,12 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, accountID int64, snapshot *OpenAICodexUsageSnapshot) {
 	if snapshot == nil {
 		return
+	}
+	// 成功响应是学习「模型 -> limit_id 家族」归属的主要来源：本次请求消耗了
+	// 哪个家族的额度，那个家族的 used_percent 就会上涨。这里放在写库之前，
+	// 与是否持久化无关。
+	if len(snapshot.Families) > 0 {
+		openAIFamilyModels.Observe(accountID, openAIFamilyModelFromContext(ctx), snapshot.Families)
 	}
 	if s == nil || s.accountRepo == nil {
 		return

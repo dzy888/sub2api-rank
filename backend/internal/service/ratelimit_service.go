@@ -1373,7 +1373,11 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 		if checker, ok := s.runtimeBlocker.(interface {
 			ShouldRetryOpenAIOAuth429(*Account, http.Header, []byte) bool
 		}); ok && checker.ShouldRetryOpenAIOAuth429(account, headers, responseBody) {
-			return
+			// 非默认 limit_id 家族耗尽时不早退：模型级冷却不阻止本次请求重试，
+			// 但必须让后续新请求立刻避开该账号上的这个模型。
+			if !hasNonDefaultExhaustedCodexFamily(ParseCodexRateLimitHeaders(headers), time.Now()) {
+				return
+			}
 		}
 	}
 	s.handle429Cooldown(ctx, account, headers, responseBody)
@@ -1423,6 +1427,12 @@ func (s *RateLimitService) handle429Cooldown(ctx context.Context, account *Accou
 		persistOpenAI429PlanType(ctx, s.accountRepo, account, responseBody)
 		s.persistOpenAICodexSnapshot(ctx, account, headers)
 		notifyOpenAIAutoReset(account.ID)
+		// 非默认 limit_id 家族耗尽时只冷却归属该家族的模型。
+		// 默认家族（codex）覆盖所有未显式归属的模型，仍走下面的整号冷却，
+		// 因此这条分支只会「缩小」影响面，不会放宽既有保护。
+		if s.coolExhaustedCodexFamily(ctx, account, headers) {
+			return
+		}
 		if resetAt := s.calculateOpenAI429ResetTime(headers); resetAt != nil {
 			s.notifyAccountSchedulingBlocked(account, *resetAt, "429")
 			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
@@ -1531,6 +1541,67 @@ func (s *RateLimitService) handle429Cooldown(ctx context.Context, account *Accou
 	}
 
 	slog.Info("account_rate_limited", "account_id", account.ID, "reset_at", resetAt)
+}
+
+// coolExhaustedCodexFamily 把「非默认 limit_id 家族耗尽」落成模型级冷却。
+//
+// codex 的额度按 limit_id 家族计：默认家族是 codex（裸 x-codex-* 头），其它家族
+// （如 codex_other）各有独立窗口。旧逻辑只读默认家族头，非默认家族打爆时看不见，
+// 只能退化成整号 5 秒冷却，同一账号上仍有额度的模型被连带拖慢。
+//
+// 归属判定取「到达 100% 的那个非默认家族」：429 时刻的读数是最强信号，不需要
+// 历史样本。默认家族耗尽不在这里处理——它覆盖所有未显式归属的模型，交给整号冷却。
+func (s *RateLimitService) coolExhaustedCodexFamily(ctx context.Context, account *Account, headers http.Header) bool {
+	if s == nil || s.accountRepo == nil || account == nil || account.Platform != PlatformOpenAI {
+		return false
+	}
+	// API key 的 429 可能转述的是另一个 ChatGPT 账号的配额，按家族归因会误导。
+	if !isOpenAIOAuthAccount(account) {
+		return false
+	}
+	snapshot := ParseCodexRateLimitHeaders(headers)
+	if snapshot == nil || len(snapshot.Families) == 0 {
+		return false
+	}
+	now := time.Now()
+	model := account.GetMappedModel(tempUnschedulableModel(ctx, nil))
+	openAIFamilyModels.Observe(account.ID, model, snapshot.Families)
+	families := openAIFamilyModels.LearnExhaustedFamilies(account.ID, model, snapshot, now)
+	if len(families) == 0 {
+		return false
+	}
+	cooled := 0
+	for family, models := range families {
+		resetAt, exhausted := snapshot.Families[family].exhaustedReset(now)
+		if !exhausted || resetAt.IsZero() {
+			// 已耗尽但没有重置时间：给不出可解释的冷却窗口，跳过该家族；
+			// 全部家族都跳过时由调用方的整号兜底接管。
+			continue
+		}
+		reason := "openai_429_family_exhausted:" + family
+		applied := 0
+		for _, scopedModel := range models {
+			setAccountModelRateLimitSnapshot(account, scopedModel, resetAt, reason, now)
+			if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, scopedModel, resetAt, reason); err != nil {
+				slog.Warn("openai_429_family_cooldown_failed",
+					"account_id", account.ID, "family", family, "model", scopedModel, "error", err)
+				continue
+			}
+			applied++
+		}
+		if applied == 0 {
+			continue
+		}
+		cooled += applied
+		slog.Info("openai_429_family_exhausted",
+			"account_id", account.ID,
+			"family", family,
+			"models", models,
+			"reset_at", resetAt,
+			"reset_in", time.Until(resetAt).Truncate(time.Second),
+		)
+	}
+	return cooled > 0
 }
 
 func (s *RateLimitService) apply429FallbackRateLimit(ctx context.Context, account *Account, reason string) {

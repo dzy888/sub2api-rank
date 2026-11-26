@@ -152,6 +152,9 @@ type OpenAICodexUsageSnapshot struct {
 	SecondaryWindowMinutes      *int     `json:"secondary_window_minutes,omitempty"`
 	PrimaryOverSecondaryPercent *float64 `json:"primary_over_secondary_percent,omitempty"`
 	UpdatedAt                   string   `json:"updated_at,omitempty"`
+	// Families 保存全部 limit_id 家族的读数（含默认家族 codex）。
+	// 上面的 primary/secondary 字段等价于 Families[codex]，保留是为了兼容既有调用方。
+	Families map[string]CodexLimitFamily `json:"families,omitempty"`
 }
 
 // NormalizedCodexLimits contains normalized 5h/7d rate limit data
