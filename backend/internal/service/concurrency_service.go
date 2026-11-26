@@ -238,6 +238,9 @@ type SessionConcurrencyCache interface {
 	AcquireSessionSlot(ctx context.Context, accountID int64, scope string, maxConcurrency int, requestID string) (bool, error)
 	ReleaseSessionSlot(ctx context.Context, accountID int64, scope, requestID string) error
 	GetSessionConcurrency(ctx context.Context, accountID int64, scope string) (int, error)
+	// ListOpenSessionScopes 返回该账号下仍有占用的会话 scope，用于会话溢出：
+	// 本会话已满时优先挪到别的空闲会话，而不是在原会话上死等。
+	ListOpenSessionScopes(ctx context.Context, accountID int64, limit int) ([]string, error)
 }
 
 // ConcurrencyService 管理账号和用户的并发限制。
@@ -430,6 +433,51 @@ func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID i
 // AcquireSessionSlot 获取某个会话在一个账号上的槽位。
 // 与账号槽位相同的 TTL/清理语义，只是键多了一维 scope。
 func (s *ConcurrencyService) AcquireSessionSlot(ctx context.Context, accountID int64, scope string, maxConcurrency int) (*AcquireResult, error) {
+	return s.acquireSessionSlotOnScope(ctx, accountID, scope, maxConcurrency)
+}
+
+// AcquireSessionSlotWithOverflow 先在期望会话上取槽；该会话已满时，再从同账号的
+// 其它会话里挑一个仍有空位的继续尝试，成功则返回实际落到的 scope。
+//
+// 目的：会话闸门不能只看「我这个会话满没满」。同一个账号上别的会话可能还空着，
+// 死等原会话会让并发卡在个别热点会话上（一个槽排队、其它槽空闲）。溢出只在
+// 存在空闲时发生，不会突破各会话自己的上限。
+//
+// 返回的 scope 可能与入参不同，调用方必须用返回值做后续粘性处理。
+func (s *ConcurrencyService) AcquireSessionSlotWithOverflow(ctx context.Context, accountID int64, scope string, maxConcurrency int, overflowLimit int) (*AcquireResult, string, error) {
+	if maxConcurrency <= 0 || accountID <= 0 || strings.TrimSpace(scope) == "" {
+		return &AcquireResult{Acquired: true, ReleaseFunc: func() {}}, scope, nil
+	}
+	sessionCache, ok := s.cache.(SessionConcurrencyCache)
+	if !ok {
+		return &AcquireResult{Acquired: true, ReleaseFunc: func() {}}, scope, nil
+	}
+
+	if result, err := s.acquireSessionSlotOnScope(ctx, accountID, scope, maxConcurrency); err != nil || result.Acquired {
+		return result, scope, err
+	}
+
+	open, err := sessionCache.ListOpenSessionScopes(ctx, accountID, overflowLimit)
+	if err != nil {
+		// 枚举失败不算请求失败：退化为只在原会话上排队。
+		return &AcquireResult{Acquired: false}, scope, nil
+	}
+	for _, candidate := range open {
+		if candidate == scope {
+			continue
+		}
+		result, acquireErr := s.acquireSessionSlotOnScope(ctx, accountID, candidate, maxConcurrency)
+		if acquireErr != nil {
+			continue
+		}
+		if result.Acquired {
+			return result, candidate, nil
+		}
+	}
+	return &AcquireResult{Acquired: false}, scope, nil
+}
+
+func (s *ConcurrencyService) acquireSessionSlotOnScope(ctx context.Context, accountID int64, scope string, maxConcurrency int) (*AcquireResult, error) {
 	if maxConcurrency <= 0 || accountID <= 0 || strings.TrimSpace(scope) == "" {
 		return &AcquireResult{Acquired: true, ReleaseFunc: func() {}}, nil
 	}

@@ -3103,7 +3103,9 @@ func (h *OpenAIGatewayHandler) acquireOpenAISessionSlot(c *gin.Context, account 
 	if limit <= 0 || strings.TrimSpace(sessionHash) == "" {
 		return nil, nil
 	}
-	release, err := h.concurrencyHelper.AcquireSessionSlotWithWaitTimeout(
+	// 本会话满时溢出到同账号的其它空闲会话：否则并发会卡在热点会话上排队，
+	// 而账号里其它会话是空的（上游按会话计配额，空会话不去用就是浪费）。
+	release, usedScope, err := h.concurrencyHelper.AcquireSessionSlotWithOverflowWaitTimeout(
 		c, account.ID, sessionHash, limit, h.openAISessionWaitTimeout(), isStream, streamStarted,
 	)
 	if err != nil {
@@ -3115,6 +3117,13 @@ func (h *OpenAIGatewayHandler) acquireOpenAISessionSlot(c *gin.Context, account 
 		}
 		writeError(status, errType, code, message)
 		return nil, err
+	}
+	if usedScope != "" && usedScope != sessionHash {
+		reqLog.Debug("openai.session_slot_overflowed",
+			zap.Int64("account_id", account.ID),
+			zap.String("requested_scope", sessionHash),
+			zap.String("used_scope", usedScope),
+		)
 	}
 	return release, nil
 }

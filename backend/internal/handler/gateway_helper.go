@@ -524,11 +524,27 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 // AcquireSessionSlotWithWaitTimeout 获取「账号 + 会话」维度的槽位，超时前按退避重试。
 // 命中上限时保持排队而不是直接报错，行为与账号槽位一致。
 func (h *ConcurrencyHelper) AcquireSessionSlotWithWaitTimeout(c *gin.Context, accountID int64, scope string, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
-	return h.waitForSlotWithPingAcquire(c, "session", maxConcurrency, timeout, isStream, streamStarted, true,
-		func(ctx context.Context) (*service.AcquireResult, error) {
-			return h.concurrencyService.AcquireSessionSlot(ctx, accountID, scope, maxConcurrency)
-		})
+	release, _, err := h.AcquireSessionSlotWithOverflowWaitTimeout(c, accountID, scope, maxConcurrency, timeout, isStream, streamStarted)
+	return release, err
 }
+
+// AcquireSessionSlotWithOverflowWaitTimeout 与上者相同，但本会话已满时会溢出到同账号
+// 的其它空闲会话，并回报实际占用的 scope。避免并发卡在热点会话上排队、其它会话闲置。
+func (h *ConcurrencyHelper) AcquireSessionSlotWithOverflowWaitTimeout(c *gin.Context, accountID int64, scope string, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), string, error) {
+	usedScope := scope
+	release, err := h.waitForSlotWithPingAcquire(c, "session", maxConcurrency, timeout, isStream, streamStarted, true,
+		func(ctx context.Context) (*service.AcquireResult, error) {
+			result, actual, acquireErr := h.concurrencyService.AcquireSessionSlotWithOverflow(ctx, accountID, scope, maxConcurrency, sessionOverflowScanLimit)
+			if actual != "" {
+				usedScope = actual
+			}
+			return result, acquireErr
+		})
+	return release, usedScope, err
+}
+
+// sessionOverflowScanLimit 是会话溢出时最多检查的同账号会话数。
+const sessionOverflowScanLimit = 64
 
 func (h *ConcurrencyHelper) waitForSlotWithPingAcquire(c *gin.Context, slotType string, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool, tryImmediate bool, acquireSlot func(context.Context) (*service.AcquireResult, error)) (func(), error) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)

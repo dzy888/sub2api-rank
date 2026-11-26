@@ -94,8 +94,12 @@ const (
 	// codex-rs 的 DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION = 4
 	// （旧版 agent_max_threads = 6）。会话下超过这个数量的并发线程是异常特征。
 	codexSubagentThreadsPerSession = 4
-	codexFingerprintModeExtraKey   = "codex_fingerprint_mode"
-	codexFingerprintSeedExtraKey   = "codex_fingerprint_seed"
+	// codexLegacyThreadsPerSession 是 V1 时代的单会话线程上限
+	// （codex-rs config/mod.rs:281 DEFAULT_AGENT_MAX_THREADS = 6）。源码里两档
+	// 都合法，兜底会话按较宽的 V1 形状摊开以容纳无会话身份的批量并发。
+	codexLegacyThreadsPerSession = 6
+	codexFingerprintModeExtraKey = "codex_fingerprint_mode"
+	codexFingerprintSeedExtraKey = "codex_fingerprint_seed"
 )
 
 func canonicalCodexFingerprintSeed(value any) (string, bool) {
@@ -372,10 +376,13 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 		//   - responses_metadata.rs:485 root 不带 x-openai-subagent，thread_source 为 user
 		ids.sessionID = resolveConvergedSessionIDForClient(seed, clientSessionID)
 		ids.turnID = uuid.Must(uuid.NewV7()).String()
-		// 有客户端会话标识即为该会话的 root turn：客户端自己会复用同一 session
-		// 连发多个 turn，与真实 CLI 一致。只有网关凭空合成的并发没有身份，
-		// 才会落到该会话的兄弟线程槽位上。
-		ids.isRootTurn = clientSessionID != ""
+		// 只有客户端真实声明过会话才算该会话的 root turn：客户端自己会复用同一
+		// session 连发多个 turn，与真实 CLI 一致。
+		//
+		// 内容兜底会话虽然也有 session_id，但它代表的是「同一段对话」而不是一个
+		// 已协商好身份的客户端会话；若按 root 处理，该会话内所有并发会共用同一个
+		// thread_id，等于没有分流。因此兜底会话一律走兄弟线程槽位。
+		ids.isRootTurn = isRealClientFingerprintSession(clientSessionID)
 		if ids.isRootTurn {
 			ids.threadID = ids.sessionID
 			ids.threadSource = openAICodexThreadSourceUser
@@ -465,12 +472,22 @@ func resolveConvergedSubagentThreadIDForSlot(seed, clientSessionID string, slot 
 	if seed == "" {
 		return ""
 	}
-	if clientSessionID != "" {
+	// 有身份的会话每个客户端会话独占一个兄弟线程（每个真实 CLI 会话一个线程）。
+	if isRealClientFingerprintSession(clientSessionID) {
 		return deriveStableUUIDv4("sub2api:codex-subagent-thread-id:v1:" + seed + ":" + clientSessionID)
 	}
-	// root 占掉 1 个窗口槽位，兄弟线程只能用剩下的 3 个。
+	// 内容合成的兜底会话没有真实客户端身份，只有一条「会话」却要承接全部无头并发：
+	// 按 V1 的 6 线程形状摊开（root 占 1，兄弟 5 个），否则全部并发会压在同一批
+	// 3 个线程上，直接撞单会话路由配额。
 	return deriveStableUUIDv4(fmt.Sprintf("sub2api:codex-subagent-thread-slot:v1:%s:%d",
-		seed, slot%(codexSubagentThreadsPerSession-1)))
+		seed, slot%(codexLegacyThreadsPerSession-1)))
+}
+
+// isRealClientFingerprintSession 判断会话身份是否来自客户端声明的头。
+// 内容兜底身份统一带 content: 前缀（见 resolveClientFingerprintSessionID）。
+func isRealClientFingerprintSession(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	return sessionID != "" && !strings.HasPrefix(sessionID, "content:")
 }
 
 // extractClientSessionID 从请求头中提取客户端原始的会话标识。
@@ -490,6 +507,28 @@ func resolveCodexFingerprintIDsFromRequest(account *Account, clientHeaders http.
 	return resolveCodexFingerprintIDsFromRequestWithBody(account, clientHeaders, nil)
 }
 
+// resolveClientFingerprintSessionID 解析用于收敛的上游会话身份。
+//
+// 只有客户端显式声明了 session 头才算真实会话身份。没有声明的请求（SDK、
+// python-requests、裸 Go http 客户端）若直接落到无身份的兜底分支，会全部收敛成
+// 同一个上游 session 的少数固定子线程槽位——实测一个账号上 4144 个无身份请求
+// 被塞进 1 个 session 的 3 个槽位，全部撞上游的单会话路由配额
+// （route_rate_limit_exceeded），加 slot_count 也不起作用。
+//
+// 因此退回内容种子：同一段对话的后续 turn 首条用户消息不变，仍落在同一会话；
+// 不同对话自然分散到不同会话。派生前缀与真实头值区分开，避免与客户端真值撞车。
+func resolveClientFingerprintSessionID(clientHeaders http.Header, body []byte) string {
+	if clientHeaders != nil {
+		if v := extractClientSessionID(clientHeaders); v != "" {
+			return v
+		}
+	}
+	if seed := deriveOpenAIAnchoredContentSessionSeed(body); seed != "" {
+		return "content:" + deriveStableUUIDv4(seed)
+	}
+	return ""
+}
+
 // resolveCodexFingerprintIDsFromRequestWithBody 在解析收敛 ID 的同时按请求体推导
 // 上下文窗口序号；body 为 nil 时退化为仅看头。
 func resolveCodexFingerprintIDsFromRequestWithBody(account *Account, clientHeaders http.Header, body []byte) *codexFingerprintIDs {
@@ -500,10 +539,7 @@ func resolveCodexFingerprintIDsFromRequestWithBody(account *Account, clientHeade
 	if mode == codexFingerprintOff {
 		return nil
 	}
-	clientSessionID := ""
-	if clientHeaders != nil {
-		clientSessionID = extractClientSessionID(clientHeaders)
-	}
+	clientSessionID := resolveClientFingerprintSessionID(clientHeaders, body)
 	ids := resolveCodexFingerprintIDs(account, clientSessionID, mode)
 	if ids != nil {
 		ids.windowNumber = resolveCodexWindowNumber(clientHeaders, body)

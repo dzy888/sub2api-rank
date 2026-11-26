@@ -35,6 +35,10 @@ func (s *sessionSlotCacheStub) GetSessionConcurrency(context.Context, int64, str
 	return 0, nil
 }
 
+func (s *sessionSlotCacheStub) ListOpenSessionScopes(context.Context, int64, int) ([]string, error) {
+	return nil, nil
+}
+
 func TestAcquireSessionSlotWithWaitTimeoutUsesConfiguredLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cache := &sessionSlotCacheStub{}
@@ -50,4 +54,39 @@ func TestAcquireSessionSlotWithWaitTimeoutUsesConfiguredLimit(t *testing.T) {
 
 	release()
 	require.Equal(t, []string{"scope-a"}, cache.released, "释放必须回到同一会话键")
+}
+
+// overflowSessionStub 让第一个请求的会话恒满、其它会话可抢，用于验证溢出。
+type overflowSessionStub struct {
+	sessionSlotCacheStub
+	fullScope string
+	open      []string
+}
+
+func (s *overflowSessionStub) AcquireSessionSlot(_ context.Context, _ int64, scope string, _ int, _ string) (bool, error) {
+	if scope == s.fullScope {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (s *overflowSessionStub) ListOpenSessionScopes(context.Context, int64, int) ([]string, error) {
+	return s.open, nil
+}
+
+func TestAcquireSessionSlotOverflowsToIdleSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cache := &overflowSessionStub{fullScope: "hot", open: []string{"hot", "idle"}}
+	helper := NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatClaude, 0)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	release, usedScope, err := helper.AcquireSessionSlotWithOverflowWaitTimeout(c, 1, "hot", 4, time.Second, false, new(bool))
+	require.NoError(t, err)
+	require.NotNil(t, release)
+	require.Equal(t, "idle", usedScope, "热点会话满时必须溢出到空闲会话，而不是原地排队")
+
+	// 释放必须回到实际占用的会话，否则会把槽位泄漏在错误的会话上。
+	release()
+	require.Equal(t, []string{"idle"}, cache.released)
 }

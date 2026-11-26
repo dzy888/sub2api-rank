@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -918,6 +919,45 @@ func (c *concurrencyCache) GetSessionConcurrency(ctx context.Context, accountID 
 		return 0, err
 	}
 	return result, nil
+}
+
+// ListOpenSessionScopes 返回该账号下仍有并发占用的会话 scope。
+// 只用于会话溢出判定：调用方据此挑一个空闲会话，而不是在原会话上死等。
+func (c *concurrencyCache) ListOpenSessionScopes(ctx context.Context, accountID int64, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	prefix := fmt.Sprintf("%s%d:", sessionSlotKeyPrefix, accountID)
+	now := time.Now().Unix()
+	scopes := make([]string, 0, limit)
+	var cursor uint64
+	for len(scopes) < limit {
+		keys, next, err := c.rdb.Scan(ctx, cursor, prefix+"*", 200).Result()
+		if err != nil {
+			return scopes, err
+		}
+		for _, key := range keys {
+			// 与计数脚本同口径：只统计 TTL 窗口内的成员，过期成员视为空闲。
+			vals, err := c.rdb.ZRangeWithScores(ctx, key, 0, -1).Result()
+			if err != nil {
+				continue
+			}
+			live := 0
+			for _, v := range vals {
+				if int64(v.Score) > now-int64(c.slotTTLSeconds) {
+					live++
+				}
+			}
+			if live > 0 {
+				scopes = append(scopes, strings.TrimPrefix(key, prefix))
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return scopes, nil
 }
 
 func (c *concurrencyCache) GetAccountConcurrency(ctx context.Context, accountID int64) (int, error) {

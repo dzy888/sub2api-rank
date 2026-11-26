@@ -965,8 +965,10 @@ func TestResolveCodexFingerprintIDs_SubagentMode(t *testing.T) {
 	require.NotEqual(t, a.sessionID, c.sessionID, "不同客户端会话是不同的上游会话")
 	require.Equal(t, c.sessionID, c.threadID)
 
-	// 无客户端身份（网关自行合成的并发）→ 摊到固定的子线程集合上，
-	// 数量不超过真实 Codex 的单会话上限，否则会话下线程数会失控。
+	// 既无客户端会话头、也无请求体 → 仍落在单一兜底会话的兄弟线程上。
+	// 该兜底会话按 V1 的 6 线程形状摊开（root 占 1，兄弟 5 个）：
+	// 源码给 4（V2）与 6（V1）两档都算合法，兜底会话要承接全部无头并发，
+	// 用较宽的一档才不会把并发全压在同一批 3 个线程上。
 	seen := map[string]bool{}
 	seenSession := map[string]bool{}
 	sawSibling := false
@@ -980,9 +982,9 @@ func TestResolveCodexFingerprintIDs_SubagentMode(t *testing.T) {
 			sawSibling = true
 		}
 	}
-	require.Len(t, seenSession, 1, "所有并发仍属同一会话")
-	require.LessOrEqual(t, len(seen), codexSubagentThreadsPerSession-1,
-		"兄弟线程数不得超过真实客户端的子代理上限（root + 兄弟 = 4）")
+	require.Len(t, seenSession, 1, "所有无身份并发仍属同一条兜底会话")
+	require.LessOrEqual(t, len(seen), codexLegacyThreadsPerSession-1,
+		"兄弟线程数不得超过源码的 V1 单会话上限（root + 兄弟 = 6）")
 	require.True(t, sawSibling)
 }
 
@@ -1139,4 +1141,37 @@ func TestEnvelopeEmitsTurnMetadataWhenClientSentNone(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(h.Get("x-codex-turn-metadata")), &parsed))
 	require.Equal(t, "s-1", parsed["session_id"])
 	require.Equal(t, "t-1", parsed["thread_id"])
+}
+
+// 没有 session 头的 SDK 请求必须按内容分流到不同会话，否则全部并发会收敛到
+// 同一个上游 session 的少数固定线程上，直接撞单会话路由配额
+// （route_rate_limit_exceeded），且加 slot_count 无效。
+func TestResolveCodexFingerprintIDs_SubagentModeContentFanout(t *testing.T) {
+	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "subagent"})
+	headers := func() http.Header { return http.Header{} }
+	body := func(first string) []byte {
+		return []byte(`{"model":"gpt-5.6-sol","input":[{"role":"user","content":"` + first + `"}]}`)
+	}
+
+	// 不同首条用户消息 → 不同上游会话。
+	a := resolveCodexFingerprintIDsFromRequestWithBody(account, headers(), body("alpha"))
+	b := resolveCodexFingerprintIDsFromRequestWithBody(account, headers(), body("beta"))
+	require.NotNil(t, a)
+	require.NotNil(t, b)
+	require.NotEqual(t, a.sessionID, b.sessionID, "不同对话必须落到不同上游会话")
+	require.False(t, a.isRootTurn, "内容兜底会话走兄弟线程槽位")
+
+	// 同一段对话的后续 turn（首条用户消息不变）→ 仍是同一会话，保证缓存与粘性。
+	a2 := resolveCodexFingerprintIDsFromRequestWithBody(account, headers(), body("alpha"))
+	require.Equal(t, a.sessionID, a2.sessionID, "同一对话后续 turn 必须复用同一会话")
+	require.NotEqual(t, a.turnID, a2.turnID, "每个 turn 仍有独立 turn_id")
+
+	// 显式 session 头优先于内容，且仍按 root 处理。
+	withHeader := http.Header{}
+	withHeader.Set("session-id", "cli-1")
+	h := resolveCodexFingerprintIDsFromRequestWithBody(account, withHeader, body("alpha"))
+	require.NotNil(t, h)
+	require.True(t, h.isRootTurn)
+	require.Equal(t, h.sessionID, h.threadID)
+	require.NotEqual(t, a.sessionID, h.sessionID)
 }
