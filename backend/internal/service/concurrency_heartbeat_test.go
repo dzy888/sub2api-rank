@@ -26,7 +26,7 @@ func TestAccountSlotHeartbeatRefreshesUntilStopped(t *testing.T) {
 	t.Cleanup(func() { accountSlotHeartbeatInterval = original })
 
 	refresher := &heartbeatRefresherStub{}
-	stop := startAccountSlotHeartbeat(refresher, 42, "req-1")
+	stop := startAccountSlotHeartbeat(context.Background(), refresher, 42, "req-1")
 
 	require.Eventually(t, func() bool { return refresher.calls.Load() >= 2 }, time.Second, 2*time.Millisecond)
 	stop()
@@ -48,7 +48,7 @@ func TestAccountSlotHeartbeatSkipsInvalidInput(t *testing.T) {
 		{0, "req"},
 		{1, ""},
 	} {
-		stop := startAccountSlotHeartbeat(refresher, tc.accountID, tc.requestID)
+		stop := startAccountSlotHeartbeat(context.Background(), refresher, tc.accountID, tc.requestID)
 		time.Sleep(10 * time.Millisecond)
 		stop()
 	}

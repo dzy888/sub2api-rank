@@ -78,9 +78,17 @@ const (
 
 // startAccountSlotHeartbeat 在请求存活期间周期性刷新账号槽位的 score。
 // 返回的函数会停止心跳并等待其退出，重复调用安全。
-func startAccountSlotHeartbeat(refresher AccountSlotRefresher, accountID int64, requestID string) func() {
+//
+// parent 是请求自身的 context：它结束时（handler 返回）心跳必须立即停，
+// 即使调用方漏调了释放函数。否则一条没被释放的槽位会被心跳一直续命，
+// 在管理端表现为「并发数一直降不下来，但请求早就结束了」。
+func startAccountSlotHeartbeat(parent context.Context, refresher AccountSlotRefresher, accountID int64, requestID string) func() {
 	if refresher == nil || accountID <= 0 || requestID == "" {
 		return func() {}
+	}
+	var parentDone <-chan struct{}
+	if parent != nil {
+		parentDone = parent.Done()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -93,6 +101,8 @@ func startAccountSlotHeartbeat(refresher AccountSlotRefresher, accountID int64, 
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-parentDone:
 				return
 			case <-lifetime.C:
 				return
@@ -468,7 +478,7 @@ func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID i
 		// 账号槽位存活窗口很短，靠心跳续期；请求结束时停止心跳并释放槽位。
 		stopHeartbeat := func() {}
 		if refresher, ok := s.cache.(AccountSlotRefresher); ok {
-			stopHeartbeat = startAccountSlotHeartbeat(refresher, accountID, requestID)
+			stopHeartbeat = startAccountSlotHeartbeat(ctx, refresher, accountID, requestID)
 		}
 		return &AcquireResult{
 			Acquired:  true,
