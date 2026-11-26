@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -1190,14 +1189,17 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		// （codex-api/src/common.rs:467-495，From<ResponsesApiRequest> 全量拷贝）。
 		// 客户端省略时补齐默认值，避免出站帧比真实客户端少字段。
 		//
-		// agent recovery（409 可读重放）例外：那条路径的 controls digest 是在
+		// 409 可读重放（omittedHistory）例外：那条路径的 controls digest 是在
 		// 补齐之前的原始帧上冻结的，这里再改帧会触发 wire_changed。
-		recovery := openAIAgentRecoveryFromContext(ctx)
+		// 注意 recovery 对象在正常路径上恒存在（WithOpenAIAgentMessageRecovery
+		// 无条件安装），只有 omittedHistory 才代表真正发生过重放。
+		replayPath := false
+		if recovery := openAIAgentRecoveryFromContext(ctx); recovery != nil && recovery.omittedHistory {
+			replayPath = true
+		}
 		alignStore := account != nil && account.UsesOpenAICodexProtocol() && !s.isOpenAIWSStoreRecoveryAllowed(account)
 		aligned, alignChanged, alignErr := alignCodexWSResponseCreateFrameWithStore(normalized, alignStore)
-		slog.Warn("ws_align_probe", "recovery_nil", recovery == nil, "with_store", alignStore,
-			"changed", alignChanged, "before_len", len(normalized), "after_len", len(aligned), "err", alignErr)
-		if recovery == nil && alignErr == nil && alignChanged {
+		if !replayPath && alignErr == nil && alignChanged {
 			normalized = aligned
 		}
 
