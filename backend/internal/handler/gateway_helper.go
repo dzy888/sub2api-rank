@@ -194,6 +194,27 @@ func NewConcurrencyHelper(concurrencyService *service.ConcurrencyService, pingFo
 // wrapReleaseOnDone ensures release runs at most once and still triggers on context cancellation.
 // 用于避免客户端断开或上游超时导致的并发槽位泄漏。
 // 优化：基于 context.AfterFunc 注册回调，避免每请求额外守护 goroutine。
+// combineSlotReleases 把「会话槽位」和「账号槽位」的释放合并成一个幂等函数。
+//
+// 必须在包装前把账号释放函数保存到局部变量：闭包里再引用被重新赋值的变量
+// （accountRelease = sync.OnceFunc(...) 之后再调用 accountRelease()）会在
+// sync.Once.Do 内部递归调用自己。sync.Once 的互斥锁不可重入，会永久阻塞，
+// 于是「停止心跳 + 删除 Redis 账号槽位」永远执行不到，账号并发数就会一直
+// 挂在高位不下降。
+func combineSlotReleases(accountRelease, sessionRelease func()) func() {
+	if sessionRelease == nil {
+		return accountRelease
+	}
+	if accountRelease == nil {
+		return sync.OnceFunc(sessionRelease)
+	}
+	accountReleaseOnce := accountRelease
+	return sync.OnceFunc(func() {
+		sessionRelease()
+		accountReleaseOnce()
+	})
+}
+
 func wrapReleaseOnDone(ctx context.Context, releaseFunc func()) func() {
 	if releaseFunc == nil {
 		return nil

@@ -410,14 +410,11 @@ func (h *OpenAIGatewayHandler) admitOpenAIWSTurnForPricing(
 		return nil, nil, service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "too many concurrent requests for this session, please retry later", nil)
 	}
 	if sessionRelease != nil {
-		if accountRelease != nil {
-			accountRelease = sync.OnceFunc(func() {
-				sessionRelease()
-				accountRelease()
-			})
-		} else {
-			accountRelease = sync.OnceFunc(sessionRelease)
-		}
+		// 注意：这里必须调用 combineSlotReleases 保存原始账号释放函数。
+		// 若在闭包里引用被重新赋值的 accountRelease，会在 sync.Once.Do 内部
+		// 递归调用自己——Once 的互斥锁不可重入，释放直接死锁，账号槽位与心跳
+		// 都停不下来，表现为该账号并发数一直挂着不降。
+		accountRelease = combineSlotReleases(accountRelease, sessionRelease)
 	}
 	// 复核既有账务/权限策略；全部准入完成后才冻结本轮定价（计划 6.2.1）：
 	// 排队时间不得按排队前时刻计价，同一逻辑 turn 的换号重试不再进入这里。
@@ -3078,15 +3075,7 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		}
 		return nil, openAISlotAcquireFailed
 	}
-	release := accountRelease
-	if sessionRelease != nil {
-		release = sync.OnceFunc(func() {
-			sessionRelease()
-			if accountRelease != nil {
-				accountRelease()
-			}
-		})
-	}
+	release := combineSlotReleases(accountRelease, sessionRelease)
 	return wrapReleaseOnDone(ctx, release), openAISlotAcquireOK
 }
 
@@ -3898,14 +3887,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			continue
 		}
 		if sessionReleaseFunc != nil {
-			if accountReleaseFunc != nil {
-				accountReleaseFunc = sync.OnceFunc(func() {
-					sessionReleaseFunc()
-					accountReleaseFunc()
-				})
-			} else {
-				accountReleaseFunc = sync.OnceFunc(sessionReleaseFunc)
-			}
+			// 同首轮准入：必须用 combineSlotReleases 保存原始账号释放函数，
+			// 在闭包里引用被重新赋值的 accountReleaseFunc 会递归进 sync.Once 死锁。
+			accountReleaseFunc = combineSlotReleases(accountReleaseFunc, sessionReleaseFunc)
 		}
 		// 准入完成：门并入连接 ctx，turn 级复核与 failover 重选共用。
 		ctx = admissionCtx
