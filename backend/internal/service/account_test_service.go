@@ -1016,7 +1016,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	}
 
 	credentialAccount := account
-	if account.IsCredentialShadow() || account.IsProxyReplica() {
+	if account.IsCredentialShadow() {
 		resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 		if err != nil {
 			return s.sendErrorAndEnd(c, err.Error())
@@ -2559,7 +2559,7 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account *Account, testModelID string) error {
 	ctx := c.Request.Context()
 	credentialAccount := account
-	if account.IsShadow() || account.IsProxyReplica() {
+	if account.IsShadow() {
 		resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 		if err != nil {
 			return s.sendErrorAndEnd(c, "Failed to resolve account credentials")
@@ -3614,7 +3614,7 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 // OAuth 图片测试与正式转发共用 Codex Images / Responses 分流规则。
 func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Context, account *Account, modelID, prompt string) error {
 	credentialAccount := account
-	if account.IsShadow() || account.IsProxyReplica() {
+	if account.IsShadow() {
 		resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 		if err != nil {
 			return s.sendErrorAndEnd(c, "Failed to resolve account credentials")

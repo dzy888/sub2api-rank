@@ -1518,7 +1518,7 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 		return "", "", errors.New("select a capable authorization connection before requesting credentials")
 	}
 	selectedSIWC := account.IsSIWCEnabled()
-	if account.IsShadow() || account.IsProxyReplica() {
+	if account.IsShadow() {
 		credAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 		if err != nil {
 			return "", "", err

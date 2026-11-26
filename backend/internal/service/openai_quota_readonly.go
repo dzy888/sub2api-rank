@@ -22,11 +22,8 @@ func (s *OpenAIQuotaService) QueryUsageReadOnly(ctx context.Context, account *Ac
 		return nil, infraerrors.ServiceUnavailable("OPENAI_QUOTA_NOT_CONFIGURED", "read-only quota query unavailable")
 	}
 	credentialAccount, transportAccount := account, account
-	if account.IsShadow() || account.IsProxyReplica() {
-		ownerID := account.CredentialOwnerAccountID()
-		if account.IsShadow() {
-			ownerID = *account.ParentAccountID
-		}
+	if account.IsShadow() {
+		ownerID := *account.ParentAccountID
 		if s.accountRepo == nil {
 			return nil, infraerrors.ServiceUnavailable("OPENAI_QUOTA_NOT_CONFIGURED", "credential owner lookup unavailable")
 		}
@@ -38,7 +35,7 @@ func (s *OpenAIQuotaService) QueryUsageReadOnly(ctx context.Context, account *Ac
 		if err := authorizeReadOnlyQuotaAccount(ctx, owner); err != nil {
 			return nil, err
 		}
-		if owner.IsShadow() || owner.IsProxyReplica() {
+		if owner.IsShadow() {
 			return nil, infraerrors.Conflict("OPENAI_QUOTA_CREDENTIAL_OWNER_INVALID", "credential owner is unavailable")
 		}
 		credentialAccount = owner
@@ -113,7 +110,7 @@ func (s *OpenAIQuotaService) readOnlyQuotaProxy(ctx context.Context, account *Ac
 	if account.OpenAIRequestProxyEnabled() {
 		return resolveOpenAIMaintenanceProxy(ctx, account, s.proxyRepo)
 	}
-	if account.ProxyID == nil && !account.IsProxyReplica() {
+	if account.ProxyID == nil {
 		return "", nil
 	}
 	proxy := account.Proxy

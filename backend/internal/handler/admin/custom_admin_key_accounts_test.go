@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -19,53 +18,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
-
-type scopedMonitoringService struct {
-	service.AdminService
-	accounts []service.Account
-}
-
-func (s *scopedMonitoringService) ScopedAdminList(context.Context, pagination.PaginationParams, string, string, string, string) ([]service.Account, int64, error) {
-	return s.accounts, int64(len(s.accounts)), nil
-}
-func (*scopedMonitoringService) ScopedAdminWrite(context.Context, int64, string, map[string]json.RawMessage, func(context.Context, *service.Account) (*service.Account, error)) (*service.Account, error) {
-	panic("unexpected write")
-}
-func TestScopedAdminMonitoringFailsClosedOnIncompleteConcurrency(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	for _, tc := range []struct {
-		name  string
-		cache *accountSortConcurrencyCache
-		want  int
-	}{
-		{"unavailable", &accountSortConcurrencyCache{err: errors.New("PRIVATE_REDIS_ERROR")}, 503},
-		{"missing", &accountSortConcurrencyCache{counts: map[int64]int{}}, 503},
-		{"healthy", &accountSortConcurrencyCache{counts: map[int64]int{9: 3}}, 200},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			expires := time.Now().Add(time.Hour)
-			a := service.Account{ID: 9, Platform: "openai", Type: "oauth", Status: "error", ErrorMessage: "Unauthorized (401): PRIVATE_TOKEN", Concurrency: 5, GroupIDs: []int64{1}, Groups: []*service.Group{{ID: 1, Status: "active"}}, ExpiresAt: &expires, Extra: map[string]any{service.CredentialOwnerAccountIDKey: float64(7), "openai_oauth_responses_websockets_v2_mode": "ctx_pool", "password": "PRIVATE_PASSWORD"}}
-			h := &AccountHandler{adminService: &scopedMonitoringService{accounts: []service.Account{a}}, concurrencyService: service.NewConcurrencyService(tc.cache)}
-			r := gin.New()
-			r.Use(func(c *gin.Context) {
-				c.Request = c.Request.WithContext(adminaccess.WithPrincipal(c.Request.Context(), &adminaccess.Principal{Policy: adminaccess.Policy{Rules: []adminaccess.Rule{{Permissions: []string{"accounts.read"}, GroupIDs: []int64{1}, AccountTypes: []string{"oauth"}}}}}))
-			})
-			r.Use(h.ScopedAdminKeyAccounts)
-			r.GET("/api/v1/admin/accounts", func(*gin.Context) { t.Fatal("must use scoped handler") })
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, httptest.NewRequest("GET", "/api/v1/admin/accounts?page_size=1000", nil))
-			require.Equal(t, tc.want, w.Code, w.Body.String())
-			require.NotContains(t, w.Body.String(), "PRIVATE")
-			if tc.want == 200 {
-				require.Contains(t, w.Body.String(), `"current_concurrency":3`)
-				require.Contains(t, w.Body.String(), `"auth_invalid_reason":"requires_relogin"`)
-				require.Contains(t, w.Body.String(), `"credential_owner_account_id":7`)
-				require.Contains(t, w.Body.String(), `"groups":[{"id":1,"status":"active"}]`)
-				require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
-			}
-		})
-	}
-}
 
 func TestScopedAdminAccountDTORedactsSecretsAndForeignGroups(t *testing.T) {
 	p := adminaccess.Policy{Rules: []adminaccess.Rule{{Permissions: []string{"accounts.read"}, GroupIDs: []int64{1}, AccountTypes: []string{"oauth"}}}}
@@ -100,24 +52,6 @@ func TestScopedAdminAccountErrorsAreClassifiedAndRedacted(t *testing.T) {
 	if w.Code != 503 || strings.Contains(w.Body.String(), "TOP_SECRET") {
 		t.Fatal(w.Body.String())
 	}
-}
-
-func TestScopedAdminAccountDTOIncludesRequestProxyGroupWithoutSecrets(t *testing.T) {
-	policy := adminaccess.Policy{Rules: []adminaccess.Rule{{Permissions: []string{"accounts.read"}, GroupIDs: []int64{252}, AccountTypes: []string{"oauth"}, Platforms: []string{"openai"}}}}
-	account := &service.Account{ID: 101, Platform: "openai", Type: "oauth", GroupIDs: []int64{252}, Schedulable: false,
-		Credentials: map[string]any{"access_token": "PRIVATE_TOKEN"},
-		Extra:       map[string]any{"openai_proxy_mode": "request", "openai_proxy_ids": []int64{11, 22}, "private": "PRIVATE_EXTRA"}}
-	encoded, err := json.Marshal(scopedAdminAccountDTO(account, policy))
-	require.NoError(t, err)
-	require.NotContains(t, string(encoded), "PRIVATE")
-	var out struct {
-		Extra       map[string]any `json:"extra"`
-		Schedulable bool           `json:"schedulable"`
-	}
-	require.NoError(t, json.Unmarshal(encoded, &out))
-	require.Equal(t, "request", out.Extra["openai_proxy_mode"])
-	require.Equal(t, []any{float64(11), float64(22)}, out.Extra["openai_proxy_ids"])
-	require.False(t, out.Schedulable)
 }
 func TestScopedAdminAccountMiddlewareKeepsJWTAndDeniesUnavailableService(t *testing.T) {
 	gin.SetMode(gin.TestMode)

@@ -491,12 +491,6 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		}
 		accounts.POST("", h.Admin.Account.Create)
 		accounts.POST("/:id/duplicate", h.Admin.Account.Duplicate)
-		accounts.POST("/:id/proxy-replicas", h.Admin.Account.CreateProxyReplicas)
-		accounts.GET("/:id/proxy-replicas/:operation_id", h.Admin.Account.GetProxyReplicaOperation)
-		accounts.GET("/:id/proxy-replicas/relogin-recoveries/capabilities", h.Admin.Account.ProxyRecoveryCapabilities)
-		accounts.POST("/:id/proxy-replicas/relogin-recoveries", h.Admin.Account.PrepareProxyRecovery)
-		accounts.GET("/:id/proxy-replicas/relogin-recoveries/:operation_id", h.Admin.Account.GetProxyRecovery)
-		accounts.POST("/:id/proxy-replicas/relogin-recoveries/:operation_id/resume", h.Admin.Account.ResumeProxyRecovery)
 		accounts.POST("/check-mixed-channel", h.Admin.Account.CheckMixedChannel)
 		accounts.POST("/import/codex-session", h.Admin.Account.ImportCodexSession)
 		accounts.POST("/sync/crs", h.Admin.Account.SyncFromCRS)

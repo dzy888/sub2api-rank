@@ -107,10 +107,6 @@ func NewOpenAITokenProvider(
 func (p *OpenAITokenProvider) SetRefreshAPI(api *OAuthRefreshAPI, executor OAuthRefreshExecutor) {
 	p.refreshAPI = api
 	p.executor = executor
-	if p.openAIOAuthService != nil {
-		p.openAIOAuthService.proxyOwnerRefreshAPI = api
-		p.openAIOAuthService.proxyOwnerRefreshExecutor = executor
-	}
 }
 
 // SetRefreshPolicy injects caller-side refresh policy.
@@ -138,23 +134,6 @@ func (p *OpenAITokenProvider) ensureMetrics() {
 
 // GetAccessToken returns a valid access_token.
 func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Account) (string, error) {
-	if account.IsProxyReplica() {
-		owner, err := ResolveProxyReplicaOwner(ctx, p.accountRepo, account)
-		if err != nil {
-			return "", err
-		}
-		account = owner
-	}
-	if account.IsProxyReplicaSource() {
-		if p.refreshAPI == nil || p.executor == nil {
-			return "", errors.New("credential owner refresh coordinator unavailable")
-		}
-		fresh, err := p.accountRepo.GetByID(ctx, account.ID)
-		if err != nil || !ProxyReplicaOwnerUsable(fresh, time.Now()) {
-			return "", errors.New("proxy replica owner unavailable")
-		}
-		account = fresh
-	}
 	p.ensureMetrics()
 	if account == nil {
 		return "", errors.New("account is nil")
@@ -168,7 +147,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	// 1) Try cache first.
 	// Owners always use their current DB credential document, including after
 	// token rotation, revocation and conversion from a normal cached account.
-	if p.tokenCache != nil && !account.IsProxyReplicaSource() {
+	if p.tokenCache != nil {
 		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
 			slog.Debug("openai_token_cache_hit", "account_id", account.ID)
 			return token, nil
@@ -200,9 +179,6 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 
 		result, err := p.refreshAPI.RefreshIfNeeded(ctx, account, p.executor, openAITokenRefreshSkew)
 		if err != nil {
-			if account.IsProxyReplicaSource() {
-				return "", err
-			}
 			_, hasRequestRoute := openAIRequestProxyFromContext(ctx, account.ID)
 			if hasRequestRoute && (errors.Is(err, errOpenAIRequestProxyUnavailable) || infraerrors.Reason(err) == "OPENAI_PROXY_UNAVAILABLE") {
 				// A rejected request route must not fall back to the old token.
@@ -215,9 +191,6 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			p.metrics.refreshFailure.Add(1)
 			refreshFailed = true
 		} else if result.LockHeld {
-			if account.IsProxyReplicaSource() {
-				return "", errors.New("credential owner refresh in progress; retry")
-			}
 			if p.refreshPolicy.OnLockHeld == ProviderLockHeldWaitForCache {
 				p.metrics.lockContention.Add(1)
 				p.metrics.touchNow()
@@ -269,7 +242,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	}
 
 	// 3) Populate cache with TTL.
-	if p.tokenCache != nil && !account.IsProxyReplicaSource() {
+	if p.tokenCache != nil {
 		latestAccount, isStale := CheckTokenVersion(ctx, account, p.accountRepo)
 		if isStale && latestAccount != nil {
 			slog.Debug("openai_token_version_stale_use_latest", "account_id", account.ID)

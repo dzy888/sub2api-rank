@@ -22,7 +22,7 @@ const codexAccountIdentitySourceContextKey = "openai_codex_account_identity_sour
 // point overwrites the staged source before projecting outbound identity.
 func (s *OpenAIGatewayService) prepareCodexAccountIdentitySource(ctx context.Context, c *gin.Context, account *Account) (*Account, error) {
 	source := account
-	if account != nil && (account.IsShadow() || account.IsProxyReplica()) {
+	if account != nil && (account.IsShadow()) {
 		resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 		if err != nil {
 			return nil, err

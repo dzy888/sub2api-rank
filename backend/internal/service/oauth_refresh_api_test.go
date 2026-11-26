@@ -745,42 +745,6 @@ func TestRefreshIfNeeded_OpenAIEnrichmentTimeoutKeepsRotatedCredentials(t *testi
 	require.NoError(t, repo.openAIPersistCtxErr)
 }
 
-func TestProxyReplicaOwnerEnrichmentTimeoutKeepsRotatedCredentials(t *testing.T) {
-	_, owner, _ := proxyReplicaFixture()
-	owner.Credentials["expires_at"] = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
-	repo := &refreshAPIAccountRepo{account: owner, respectReadContext: true}
-	cache := &refreshAPICacheStub{lockResult: true}
-	client := &openAIRotationClientStub{}
-	oauthService := NewOpenAIOAuthService(nil, client)
-	defer oauthService.Stop()
-	oauthService.SetPrivacyClientFactory(func(string) (*req.Client, error) {
-		return req.C().WrapRoundTripFunc(func(req.RoundTripper) req.RoundTripFunc {
-			return func(request *req.Request) (*req.Response, error) {
-				<-request.Context().Done()
-				return nil, request.Context().Err()
-			}
-		}), nil
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	executor := NewOpenAITokenRefresher(oauthService, repo)
-	result, err := NewOAuthRefreshAPI(repo, cache).RefreshIfNeeded(ctx, owner, executor, time.Hour)
-
-	require.NoError(t, err, "the owner must use the coordinated refresh path without recursively refreshing")
-	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
-	require.Equal(t, 1, client.rotationCalls)
-	require.True(t, result.Refreshed)
-	require.Equal(t, owner.ID, result.Account.ID)
-	require.True(t, result.Account.IsProxyReplicaSource())
-	require.False(t, result.Account.Schedulable)
-	require.Equal(t, "rotated-refresh", repo.account.GetOpenAIRefreshToken())
-	require.Equal(t, 1, repo.openAISuccessCASCalls)
-	require.NoError(t, repo.openAIPersistCtxErr)
-	require.Equal(t, 1, cache.deleteCalls)
-	require.Equal(t, OpenAITokenCacheKey(owner), cache.deleteKey)
-	require.Equal(t, 1, cache.releaseCalls)
-}
-
 func TestRefreshIfNeeded_OpenAILockLeaseReservesPersistenceBudget(t *testing.T) {
 	account := openAIRefreshTestAccount()
 	repo := &refreshAPIAccountRepo{account: account}

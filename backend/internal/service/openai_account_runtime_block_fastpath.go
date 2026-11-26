@@ -216,13 +216,6 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 		stateCtx = s.rateLimitService.observeAccountOps(stateCtx, account, statusCode, headers, responseBody)
 	}
 	if account != nil && account.Platform == PlatformOpenAI && isOpenAIHTTPUpstreamAccessStateError(statusCode, "", responseBody) {
-		if account.IsProxyReplica() && s != nil && s.accountRepo != nil {
-			owner, err := s.accountRepo.GetByID(stateCtx, account.CredentialOwnerAccountID())
-			if err != nil || owner == nil {
-				return true
-			}
-			account = owner
-		}
 		message := "OpenAI upstream account or workspace is unavailable"
 		if upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(responseBody)); upstreamMsg != "" {
 			message = upstreamMsg

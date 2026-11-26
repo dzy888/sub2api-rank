@@ -11,9 +11,6 @@ import (
 // 设计为包级函数（非任何 service 的方法），以便 OpenAIGatewayService / OpenAIQuotaService /
 // AccountUsageService 等不同接收者共享同一实现。
 func resolveCredentialAccount(ctx context.Context, repo AccountRepository, account *Account) (*Account, error) {
-	if account.IsProxyReplica() {
-		return ResolveProxyReplicaOwner(ctx, repo, account)
-	}
 	if account == nil || !account.IsShadow() {
 		return account, nil
 	}

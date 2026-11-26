@@ -370,13 +370,6 @@ func batchUsageErrorMessage(err error) string {
 }
 
 func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *Account, forceProbe bool) (*UsageInfo, error) {
-	if account.IsProxyReplica() {
-		owner, err := ResolveProxyReplicaOwner(ctx, s.accountRepo, account)
-		if err != nil {
-			return nil, err
-		}
-		account = owner
-	}
 	if account == nil {
 		return nil, fmt.Errorf("account is required")
 	}

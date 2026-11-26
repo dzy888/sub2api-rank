@@ -530,7 +530,7 @@ func (s *AccountTokenGuardV2Service) runProbe(ctx context.Context, record Accoun
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if err != nil || account == nil || account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth || account.IsCredentialShadow() || account.IsProxyReplica() || account.IsOpenAIPersonalAccessToken() || account.IsOpenAIAgentIdentity() {
+	if err != nil || account == nil || account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth || account.IsCredentialShadow() || account.IsOpenAIPersonalAccessToken() || account.IsOpenAIAgentIdentity() {
 		completion.ProbeDetail = "account is no longer an eligible OpenAI OAuth parent account"
 		completion.BlockedReason = completion.ProbeDetail
 		return s.completeProbe(ctx, record.AccountID, owner, completion)

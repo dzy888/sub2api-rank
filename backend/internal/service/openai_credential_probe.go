@@ -21,7 +21,7 @@ func (s *OpenAIGatewayService) FetchOpenAIModelsListFresh(ctx context.Context, a
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if s == nil || account == nil || !account.IsOpenAIOAuth() || account.IsCredentialShadow() || account.IsProxyReplica() || account.IsOpenAIPersonalAccessToken() || account.IsOpenAIAgentIdentity() {
+	if s == nil || account == nil || !account.IsOpenAIOAuth() || account.IsCredentialShadow() || account.IsOpenAIPersonalAccessToken() || account.IsOpenAIAgentIdentity() {
 		return nil, infraerrors.BadRequest("OPENAI_CREDENTIAL_PROBE_ACCOUNT_INVALID", "credential inspection requires an OpenAI OAuth parent account")
 	}
 	clientVersion := CodexCanonicalClientVersion()

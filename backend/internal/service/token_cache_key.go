@@ -5,9 +5,6 @@ import "strconv"
 // OpenAITokenCacheKey 生成 OpenAI OAuth 账号的缓存键
 // 格式: "openai:account:{account_id}"
 func OpenAITokenCacheKey(account *Account) string {
-	if account.IsProxyReplica() {
-		return "openai:account:" + strconv.FormatInt(account.CredentialOwnerAccountID(), 10)
-	}
 	if account != nil && account.AuthConnectionID != "" {
 		return "openai:connection:" + account.AuthConnectionID
 	}

@@ -125,7 +125,7 @@ func (s *adminServiceImpl) validateExcelBPSProxySettingsChange(ctx context.Conte
 	if !supplied && len(ids) == 0 {
 		return nil
 	}
-	if account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth || account.IsShadow() || account.IsOpenAIAgentIdentity() || account.IsOpenAIPersonalAccessToken() || (account.IsProxyReplica() && mode == ExcelBPSProxyModeRequest) {
+	if account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth || account.IsShadow() || account.IsOpenAIAgentIdentity() || account.IsOpenAIPersonalAccessToken() {
 		return infraerrors.BadRequest("INVALID_BPS_PROXY_ACCOUNT", "BPS request proxies require an OpenAI OAuth account")
 	}
 	if mode == ExcelBPSProxyModeRequest {

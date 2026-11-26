@@ -98,10 +98,6 @@ func (r *accountRepository) ScopedAdminList(ctx context.Context, p pagination.Pa
 		}
 		extra := map[string]any{}
 		_ = json.Unmarshal(row.NetworkExtra, &extra)
-		var ownerID int64
-		if json.Unmarshal(row.OwnerID, &ownerID) == nil && ownerID > 0 {
-			extra[service.CredentialOwnerAccountIDKey] = ownerID
-		}
 		accounts = append(accounts, service.Account{ID: row.ID, Name: row.Name, Notes: row.Notes, Platform: row.Platform, Type: row.Type, Status: row.Status, Schedulable: row.Schedulable, Concurrency: row.Concurrency, Priority: row.Priority,
 			GroupIDs: groupIDsByAccount[row.ID], Groups: groupsByAccount[row.ID], Credentials: credentials, Extra: extra,
 			ProxyID: row.ProxyID, ParentAccountID: row.ParentAccountID, LoadFactor: row.LoadFactor, ExpiresAt: row.ExpiresAt, AutoPauseOnExpired: row.AutoPauseOnExpired,

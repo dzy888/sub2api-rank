@@ -284,9 +284,6 @@ func accountLoadPreferenceRate(account *Account, loadRate int) int {
 }
 
 func (a *Account) IsSchedulable() bool {
-	if a.IsProxyReplicaSource() {
-		return false
-	}
 	// Fail closed until the four gateway protocols and their final admission
 	// checks are implemented together. Manual switches cannot bypass this gate.
 	if a.IsGateway() || a.Platform == PlatformGateway {
@@ -3896,9 +3893,6 @@ func (a *Account) IsShadow() bool { return a != nil && a.ParentAccountID != nil 
 // RPMAccountID returns the counter owner for per-minute limits. Credential
 // shadows intentionally share their parent account's upstream quota.
 func (a *Account) RPMAccountID() int64 {
-	if a.IsProxyReplica() {
-		return a.CredentialOwnerAccountID()
-	}
 	if a == nil {
 		return 0
 	}

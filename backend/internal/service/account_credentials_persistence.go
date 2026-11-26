@@ -11,9 +11,6 @@ type accountCredentialsUpdater interface {
 }
 
 func persistAccountCredentials(ctx context.Context, repo AccountRepository, account *Account, credentials map[string]any) error {
-	if account.IsProxyReplica() {
-		return errors.New("proxy replica credentials are managed by the owner")
-	}
 	if account != nil && account.AuthConnectionID != "" {
 		return errors.New("managed connection credentials require connection CAS")
 	}

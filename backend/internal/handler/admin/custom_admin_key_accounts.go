@@ -51,9 +51,8 @@ func scopedAdminAccountDTO(a *service.Account, p adminaccess.Policy) gin.H {
 		// Keep the existing push scanner compatible without exposing its raw body.
 		result["error_message"] = "Unauthorized (401): authentication invalid"
 	}
-	ownerID := a.CredentialOwnerAccountID()
-	result["credential_owner_account_id"] = ownerID
-	result["source_account_id"] = ownerID
+	result["credential_owner_account_id"] = a.ID
+	result["source_account_id"] = a.ID
 	if extra := service.ScopedAdminSafeExtra(a); len(extra) > 0 {
 		result["extra"] = extra
 	}
@@ -107,30 +106,6 @@ func (h *AccountHandler) ScopedAdminKeyAccounts(c *gin.Context) {
 	}
 	if path == base+"/import/codex-session" && c.Request.Method == "POST" {
 		h.scopedAdminImportCodexSession(c)
-		return
-	}
-	if path == base+"/:id/proxy-replicas" && c.Request.Method == "POST" {
-		h.CreateProxyReplicas(c)
-		return
-	}
-	if path == base+"/:id/proxy-replicas/:operation_id" && c.Request.Method == "GET" {
-		h.GetProxyReplicaOperation(c)
-		return
-	}
-	if path == base+"/:id/proxy-replicas/relogin-recoveries/capabilities" && c.Request.Method == "GET" {
-		h.ProxyRecoveryCapabilities(c)
-		return
-	}
-	if path == base+"/:id/proxy-replicas/relogin-recoveries" && c.Request.Method == "POST" {
-		h.PrepareProxyRecovery(c)
-		return
-	}
-	if path == base+"/:id/proxy-replicas/relogin-recoveries/:operation_id" && c.Request.Method == "GET" {
-		h.GetProxyRecovery(c)
-		return
-	}
-	if path == base+"/:id/proxy-replicas/relogin-recoveries/:operation_id/resume" && c.Request.Method == "POST" {
-		h.ResumeProxyRecovery(c)
 		return
 	}
 	api, ok := h.adminService.(service.ScopedAdminAccounts)

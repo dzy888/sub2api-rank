@@ -263,7 +263,7 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 	if err != nil {
 		return nil, err
 	}
-	if source.IsCredentialShadow() || source.IsProxyReplica() || source.IsProxyReplicaSource() {
+	if source.IsCredentialShadow() {
 		return nil, infraerrors.BadRequest(
 			"ACCOUNT_DUPLICATE_SHADOW_UNSUPPORTED",
 			"linked credential shadow accounts cannot be duplicated; duplicate the parent account instead",
@@ -794,14 +794,6 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 	}
 	previousProbeIdentity := upstreamBillingProbeIdentity(account)
-	if account.IsProxyReplica() {
-		if input.Credentials != nil && !isAllowedSparkShadowCredentialsUpdate(input.Credentials) {
-			return nil, infraerrors.BadRequest("PROXY_REPLICA_NO_CREDENTIALS", "proxy replica credentials are managed by its owner")
-		}
-		if input.Type != "" && input.Type != AccountTypeOAuth {
-			return nil, infraerrors.BadRequest("PROXY_REPLICA_IMMUTABLE_TYPE", "proxy replicas must remain OAuth accounts")
-		}
-	}
 	previousOllamaUsageIdentity := ollamaCloudUsageIdentity(account)
 	previousOpenCodeUsageIdentity := openCodeGoUsageIdentity(account)
 	// 安全/身份不变量(影子账号):通用更新路径被 edit/re-auth/refresh/batch 共用,

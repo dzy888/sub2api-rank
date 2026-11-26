@@ -26,7 +26,7 @@ const (
 
 func (a *Account) supportsOpenAIRequestProxies() bool {
 	return a != nil && a.Platform == PlatformOpenAI && a.Type == AccountTypeOAuth &&
-		!a.IsShadow() && !a.IsProxyReplica() && !a.IsOpenAIAgentIdentity() && !a.IsOpenAIPersonalAccessToken()
+		!a.IsShadow() && !a.IsOpenAIAgentIdentity() && !a.IsOpenAIPersonalAccessToken()
 }
 
 // OpenAIProxyMode returns saved routing configuration. A legacy group remains
@@ -233,7 +233,7 @@ func (s *adminServiceImpl) validateOpenAIProxySettingsChange(ctx context.Context
 	if !supplied {
 		return infraerrors.BadRequest("INVALID_OPENAI_PROXY_MODE", "OpenAI proxy IDs require an explicit proxy mode")
 	}
-	if !account.supportsOpenAIRequestProxies() && !(account.IsProxyReplica() && rawMode == OpenAIProxyModeSingle) {
+	if !account.supportsOpenAIRequestProxies() {
 		return infraerrors.BadRequest("INVALID_OPENAI_PROXY_ACCOUNT", "request proxies require an OpenAI OAuth account")
 	}
 	if rawMode != OpenAIProxyModeRequest {

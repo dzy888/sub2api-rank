@@ -220,21 +220,6 @@ func (s *adminServiceImpl) ScopedAdminWrite(ctx context.Context, id int64, actio
 		if a.IsShadow() {
 			return nil, infraerrors.Forbidden("SCOPED_ACCOUNT_FORBIDDEN", "不支持修改影子账户")
 		}
-		if a.IsProxyReplicaSource() {
-			checker, ok := s.accountRepo.(interface {
-				AuthorizeProxyReplicaOwnerWrite(context.Context, int64, []string) error
-			})
-			if !ok {
-				return nil, infraerrors.New(503, "SCOPED_ACCOUNT_UNAVAILABLE", "代理副本范围校验不可用")
-			}
-			actions := append([]string{}, permissions...)
-			if action != "" {
-				actions = append(actions, action)
-			}
-			if err := checker.AuthorizeProxyReplicaOwnerWrite(txctx, id, actions); err != nil {
-				return nil, err
-			}
-		}
 		shadows, e := s.accountRepo.ListShadowsByParent(txctx, id)
 		if e != nil {
 			return nil, e
@@ -396,9 +381,6 @@ func ScopedAdminSafeExtra(a *Account) map[string]any {
 				out[k] = v
 			}
 		}
-	}
-	if owner := a.CredentialOwnerAccountID(); owner > 0 {
-		out[CredentialOwnerAccountIDKey] = owner
 	}
 	return out
 }

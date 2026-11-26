@@ -554,15 +554,10 @@ func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID 
 	// Spark shadow accounts do not hold their own credentials; resolve to the
 	// parent account so that chatgpt_account_id / access_token / proxy all come
 	// from the parent. This must happen BEFORE the chatgpt_account_id check.
-	if account.IsShadow() || account.IsProxyReplica() {
+	if account.IsShadow() {
 		resolved, rerr := resolveCredentialAccount(ctx, s.accountRepo, account)
 		if rerr != nil {
 			return "", "", "", false, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_SHADOW_RESOLVE_FAILED", "failed to resolve shadow account: %v", rerr)
-		}
-		if account.IsProxyReplica() {
-			copy := *resolved
-			copy.ProxyID, copy.Proxy = account.ProxyID, account.Proxy
-			resolved = &copy
 		}
 		account = resolved
 	}
@@ -627,7 +622,7 @@ func (s *OpenAIQuotaService) recoverAgentIdentityTask(ctx context.Context, accou
 	if err != nil || account == nil {
 		return fmt.Errorf("account is unavailable")
 	}
-	if account.IsShadow() || account.IsProxyReplica() {
+	if account.IsShadow() {
 		account, err = resolveCredentialAccount(ctx, s.accountRepo, account)
 		if err != nil || account == nil {
 			return fmt.Errorf("credential account is unavailable")
@@ -647,7 +642,7 @@ func (s *OpenAIQuotaService) isAgentIdentityAccount(ctx context.Context, account
 	if err != nil || account == nil {
 		return false
 	}
-	if account.IsShadow() || account.IsProxyReplica() {
+	if account.IsShadow() {
 		account, err = resolveCredentialAccount(ctx, s.accountRepo, account)
 		if err != nil || account == nil {
 			return false
@@ -668,7 +663,7 @@ func (s *OpenAIQuotaService) buildCodexQuotaHeaders(ctx context.Context, account
 		}
 		return headers, "", nil
 	}
-	if account.IsShadow() || account.IsProxyReplica() {
+	if account.IsShadow() {
 		if resolved, resolveErr := resolveCredentialAccount(ctx, s.accountRepo, account); resolveErr == nil && resolved != nil {
 			account = resolved
 		} else if strings.TrimSpace(accessToken) == "" {

@@ -135,17 +135,6 @@ func (s *adminServiceImpl) ScopedAdminUpdateCodex(ctx context.Context, id int64,
 		if err := requireScopedCodexPermissions(txctx, resource, permissions...); err != nil {
 			return nil, err
 		}
-		if current.IsProxyReplicaSource() {
-			checker, ok := s.accountRepo.(interface {
-				AuthorizeProxyReplicaOwnerWrite(context.Context, int64, []string) error
-			})
-			if !ok {
-				return nil, infraerrors.New(503, "SCOPED_CODEX_UNAVAILABLE", "代理副本范围校验不可用")
-			}
-			if err := checker.AuthorizeProxyReplicaOwnerWrite(txctx, id, permissions); err != nil {
-				return nil, err
-			}
-		}
 		safe := *input
 		if safe.SkipMixedChannelCheck {
 			return nil, infraerrors.Forbidden("SCOPED_CODEX_INPUT", "受限导入不能跳过分组风险检查")
