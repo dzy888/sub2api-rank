@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -1191,13 +1192,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		//
 		// agent recovery（409 可读重放）例外：那条路径的 controls digest 是在
 		// 补齐之前的原始帧上冻结的，这里再改帧会触发 wire_changed。
-		if openAIAgentRecoveryFromContext(ctx) == nil {
-			alignStore := account != nil && account.UsesOpenAICodexProtocol() && !s.isOpenAIWSStoreRecoveryAllowed(account)
-			if aligned, changed, alignErr := alignCodexWSResponseCreateFrameWithStore(normalized, alignStore); alignErr != nil {
-				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", alignErr)
-			} else if changed {
-				normalized = aligned
-			}
+		recovery := openAIAgentRecoveryFromContext(ctx)
+		alignStore := account != nil && account.UsesOpenAICodexProtocol() && !s.isOpenAIWSStoreRecoveryAllowed(account)
+		aligned, alignChanged, alignErr := alignCodexWSResponseCreateFrameWithStore(normalized, alignStore)
+		slog.Warn("ws_align_probe", "recovery_nil", recovery == nil, "with_store", alignStore,
+			"changed", alignChanged, "before_len", len(normalized), "after_len", len(aligned), "err", alignErr)
+		if recovery == nil && alignErr == nil && alignChanged {
+			normalized = aligned
 		}
 
 		return openAIWSClientPayload{
