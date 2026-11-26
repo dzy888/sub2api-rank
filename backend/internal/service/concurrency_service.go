@@ -58,6 +58,60 @@ type ConcurrencyCache interface {
 	CleanupStaleProcessSlots(ctx context.Context, activeRequestPrefix string) error
 }
 
+// AccountSlotRefresher 是可选的账号槽位心跳能力。
+// 账号槽位的存活窗口很短（见 repository 的 accountSlotLiveTTLSeconds），
+// 在飞请求必须定期续期，否则会被当成过期槽位清掉。
+type AccountSlotRefresher interface {
+	RefreshAccountSlot(ctx context.Context, accountID int64, requestID string) error
+}
+
+// accountSlotHeartbeatInterval 必须显著小于账号槽位存活窗口（120s）。
+// 声明为变量以便测试缩短间隔。
+var accountSlotHeartbeatInterval = 30 * time.Second
+
+const (
+	accountSlotHeartbeatTimeout = 2 * time.Second
+	// accountSlotHeartbeatMaxLifetime 是心跳的上限寿命：即使释放函数因故没被调用，
+	// 心跳协程也会自行退出，不会永久驻留（槽位本身 120s 后自然过期）。
+	accountSlotHeartbeatMaxLifetime = 30 * time.Minute
+)
+
+// startAccountSlotHeartbeat 在请求存活期间周期性刷新账号槽位的 score。
+// 返回的函数会停止心跳并等待其退出，重复调用安全。
+func startAccountSlotHeartbeat(refresher AccountSlotRefresher, accountID int64, requestID string) func() {
+	if refresher == nil || accountID <= 0 || requestID == "" {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(accountSlotHeartbeatInterval)
+		defer ticker.Stop()
+		lifetime := time.NewTimer(accountSlotHeartbeatMaxLifetime)
+		defer lifetime.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-lifetime.C:
+				return
+			case <-ticker.C:
+				opCtx, opCancel := context.WithTimeout(context.Background(), accountSlotHeartbeatTimeout)
+				_ = refresher.RefreshAccountSlot(opCtx, accountID, requestID)
+				opCancel()
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
+	}
+}
+
 type APIKeyConcurrencyCache interface {
 	TrackAPIKeySlot(ctx context.Context, apiKeyID int64, requestID string) error
 	ReleaseAPIKeySlot(ctx context.Context, apiKeyID int64, requestID string) error
@@ -411,10 +465,16 @@ func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID i
 	}
 
 	if acquired {
+		// 账号槽位存活窗口很短，靠心跳续期；请求结束时停止心跳并释放槽位。
+		stopHeartbeat := func() {}
+		if refresher, ok := s.cache.(AccountSlotRefresher); ok {
+			stopHeartbeat = startAccountSlotHeartbeat(refresher, accountID, requestID)
+		}
 		return &AcquireResult{
 			Acquired:  true,
 			RequestID: requestID,
 			ReleaseFunc: func() {
+				stopHeartbeat()
 				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				if err := s.cache.ReleaseAccountSlot(bgCtx, accountID, requestID); err != nil {

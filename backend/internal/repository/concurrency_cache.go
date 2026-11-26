@@ -59,6 +59,16 @@ const (
 	// 默认槽位过期时间（分钟），可通过配置覆盖
 	defaultSlotTTLMinutes = 15
 
+	// accountSlotLiveTTLSeconds 是账号槽位的存活窗口。
+	//
+	// 账号槽位由请求侧心跳续期（见 ConcurrencyService 的 accountSlotHeartbeat），
+	// 因此窗口可以远小于「超长请求」级别的 slotTTL：心跳每 30 秒一次，连丢两次
+	// 才过期。好处是即使某条释放路径漏调 ReleaseAccountSlot，该槽位最多 2 分钟
+	// 后就不再计入并发——而不是按 30 分钟的槽位 TTL 一直把「当前并发」撑着。
+	// 之前管理端看到的并发数长期虚高就是这个原因：漏释放率很低但 TTL 太长，
+	// 稳态残留数 ≈ 漏释放率 × TTL。
+	accountSlotLiveTTLSeconds = 120
+
 	// 活跃索引用来替代后台任务全量 SCAN 槽位键。
 	// member 是账号/用户 ID，score 是“预计仍需关注到”的 Redis Unix 秒时间戳。
 	accountActiveIndexKey = "concurrency:account:active_index" // ZSET member=accountID, score=expireAtUnixSeconds
@@ -864,18 +874,38 @@ func runScriptInt64Pair(ctx context.Context, rdb *redis.Client, script *redis.Sc
 
 // Account slot operations
 
+// accountSlotTTL 返回账号槽位的存活窗口。取配置值与心跳窗口的较小值，
+// 保证即使管理员把 concurrency_slot_ttl_minutes 调得很大，账号并发也不会
+// 被漏释放的槽位长期撑高。
+func (c *concurrencyCache) accountSlotTTL() int {
+	if c.slotTTLSeconds > 0 && c.slotTTLSeconds < accountSlotLiveTTLSeconds {
+		return c.slotTTLSeconds
+	}
+	return accountSlotLiveTTLSeconds
+}
+
 func (c *concurrencyCache) AcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
 	key := accountSlotKey(accountID)
 	// 时间戳在 Lua 脚本内使用 Redis TIME 命令获取，确保多实例时钟一致
-	result, now, err := runScriptInt64Pair(ctx, c.rdb, acquireScript, []string{key, liveAccountSlotKey(accountID)}, maxConcurrency, c.slotTTLSeconds, requestID)
+	ttl := c.accountSlotTTL()
+	result, now, err := runScriptInt64Pair(ctx, c.rdb, acquireScript, []string{key, liveAccountSlotKey(accountID)}, maxConcurrency, ttl, requestID)
 	if err != nil {
 		return false, err
 	}
 	if result == 1 {
 		// 成功占槽后标记活跃账号，后台清理即可从索引定位候选账号。
-		c.touchActiveIndexAt(ctx, accountActiveIndexKey, accountID, now+int64(c.slotTTLSeconds))
+		c.touchActiveIndexAt(ctx, accountActiveIndexKey, accountID, now+int64(ttl))
 	}
 	return result == 1, nil
+}
+
+// RefreshAccountSlot 为仍在执行的请求续期账号槽位（心跳）。
+// 使用 ZADD XX：只续已存在的成员，不会把已释放或已过期的请求重新复活。
+func (c *concurrencyCache) RefreshAccountSlot(ctx context.Context, accountID int64, requestID string) error {
+	return c.rdb.ZAddXX(ctx, accountSlotKey(accountID), redis.Z{
+		Score:  float64(time.Now().Unix()),
+		Member: requestID,
+	}).Err()
 }
 
 func (c *concurrencyCache) ReleaseAccountSlot(ctx context.Context, accountID int64, requestID string) error {
@@ -963,7 +993,7 @@ func (c *concurrencyCache) ListOpenSessionScopes(ctx context.Context, accountID 
 func (c *concurrencyCache) GetAccountConcurrency(ctx context.Context, accountID int64) (int, error) {
 	key := accountSlotKey(accountID)
 	// 时间戳在 Lua 脚本内使用 Redis TIME 命令获取
-	result, err := getCountScript.Run(ctx, c.rdb, []string{key, liveAccountSlotKey(accountID)}, c.slotTTLSeconds).Int()
+	result, err := getCountScript.Run(ctx, c.rdb, []string{key, liveAccountSlotKey(accountID)}, c.accountSlotTTL()).Int()
 	if err != nil {
 		return 0, err
 	}
@@ -979,7 +1009,7 @@ func (c *concurrencyCache) GetAccountConcurrencyBatch(ctx context.Context, accou
 	if err != nil {
 		return nil, fmt.Errorf("redis TIME: %w", err)
 	}
-	cutoffTime := now.Unix() - int64(c.slotTTLSeconds)
+	cutoffTime := now.Unix() - int64(c.accountSlotTTL())
 
 	pipe := c.rdb.Pipeline()
 	type accountCmd struct {
@@ -1736,7 +1766,7 @@ func (c *concurrencyCache) GetAccountsLoadBatch(ctx context.Context, accounts []
 	if err != nil {
 		return nil, fmt.Errorf("redis TIME: %w", err)
 	}
-	cutoffTime := now.Unix() - int64(c.slotTTLSeconds)
+	cutoffTime := now.Unix() - int64(c.accountSlotTTL())
 
 	pipe := c.rdb.Pipeline()
 
@@ -1888,7 +1918,7 @@ func (c *concurrencyCache) getUsersLoadBatchExcluding(ctx context.Context, users
 
 func (c *concurrencyCache) CleanupExpiredAccountSlots(ctx context.Context, accountID int64) error {
 	key := accountSlotKey(accountID)
-	_, err := cleanupExpiredSlotsScript.Run(ctx, c.rdb, []string{key}, c.slotTTLSeconds).Result()
+	_, err := cleanupExpiredSlotsScript.Run(ctx, c.rdb, []string{key}, c.accountSlotTTL()).Result()
 	if err == nil {
 		// 单账号清理后同步索引，保持后台批量清理的候选集准确。
 		c.refreshAccountActiveIndex(ctx, accountID)
