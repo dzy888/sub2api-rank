@@ -60,10 +60,17 @@ func sameAccountRetryDelayFor(failoverErr *service.UpstreamFailoverError, retryC
 	if failoverErr == nil {
 		return sameAccountRetryDelay
 	}
+	// 服务端建议优先（Retry-After / 各上游的 request-scoped 建议），原样采信。
 	if failoverErr.SameAccountRetryDelay > 0 {
 		return failoverErr.SameAccountRetryDelay
 	}
-	if !failoverErr.RequestScopedTransient || retryCount <= 1 {
+	// 没有服务端建议时才本地退避，对齐 codex-rs：
+	// `server_retry_delay().unwrap_or_else(|| backoff(retry_count))`
+	// （protocol/error.rs retry_delay）。OAuth 429 虽不带 RequestScopedTransient
+	// （它在 newOpenAIHTTPAccountFailoverError 里提前返回，未走
+	// preserveOpenAIOAuthBinding），但同样是可重试的限流，必须让退避生长，
+	// 否则每次重试都是同一个固定间隔，等于持续顶着服务端冷却挤压。
+	if (!failoverErr.RequestScopedTransient && !failoverErr.RetryableOnSameAccount) || retryCount <= 1 {
 		return sameAccountRetryDelay
 	}
 

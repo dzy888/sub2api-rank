@@ -15,9 +15,12 @@ const (
 	openAIAccountStateUpdateTimeout = 5 * time.Second
 	openAIOAuth429FallbackCooldown  = 5 * time.Second
 	openAIOAuth429RetryWindow       = 2 * time.Minute
-	// 与 codex-rs 一致：流式 429 走 BaseBackoff，基准 200ms、指数翻倍、
-	// jitter 0.9~1.1；上游给 retry-after 时优先采信（protocol/error.rs ServerDirected）。
-	// 上限取 3.2s，与源码 5 次重试（200/400/800/1.6/3.2s）的末次量级一致。
+	// 与 codex-rs 一致：429 走 RetryPolicy::Backoff，
+	// `server_retry_delay().unwrap_or_else(|| backoff(base, attempt))`
+	// （protocol/error.rs retry_delay、codex-client/retry.rs backoff）。
+	// 基准 200ms、指数翻倍、jitter 0.9~1.1；服务端给 Retry-After 时原样采信。
+	// 本地 backoff 上限取 3.2s，与源码 5 次重试（200/400/800/1.6/3.2s）的末次量级一致。
+	// 注意：该上限只约束本地退避，不截断服务端建议的等待时间。
 	openAIOAuth429RetryDelay              = 200 * time.Millisecond
 	openAIOAuth429MaxRetryDelay           = 3200 * time.Millisecond
 	openAIOAuth429MaxAccountAttempts      = 3
@@ -424,15 +427,28 @@ func (s *OpenAIGatewayService) openAIOAuth429RetryDeadline(account *Account) tim
 	return startedAt.Add(openAIOAuth429RetryWindow)
 }
 
+// openAIOAuth429SameAccountRetryDelay 返回本次同账号重试前的等待时长。
+//
+// 语义对齐 codex-rs protocol/src/error.rs retry_delay：
+//
+//	RetryPolicy::Backoff => server_retry_delay().unwrap_or_else(|| backoff(retry_count))
+//
+// 两个分支各司其职：
+//   - 服务端给了 Retry-After：睡到那个时刻（codex-client/retry.rs 的
+//     sleep_until(retry_after.deadline())），且不被本地 backoff 上限截断——
+//     截断会让 429 在服务端要求的冷却结束前就重试，反而把账号持续压在限流线上。
+//   - 服务端没给：返回 0，让 handler 走 RequestScopedTransient 的
+//     backoff(retry_count)（200ms 起、逐次翻倍）。若这里强行返回固定 200ms，
+//     handler 会一直走"显式值优先"分支，退避就永远不生长。
+//
+// 唯一的硬边界是同账号重试窗口 deadline（窗口过期后账号进入冷却）。
 func openAIOAuth429SameAccountRetryDelay(headers http.Header, deadline time.Time) time.Duration {
-	delay := openAIOAuth429RetryDelay
 	now := time.Now()
-	if resetAt := parseRetryAfterResetTime(headers, now); resetAt != nil && resetAt.After(now) {
-		delay = resetAt.Sub(now)
+	resetAt := parseRetryAfterResetTime(headers, now)
+	if resetAt == nil || !resetAt.After(now) {
+		return 0
 	}
-	if delay > openAIOAuth429MaxRetryDelay {
-		delay = openAIOAuth429MaxRetryDelay
-	}
+	delay := resetAt.Sub(now)
 	if remaining := time.Until(deadline); !deadline.IsZero() && delay > remaining {
 		delay = remaining
 	}

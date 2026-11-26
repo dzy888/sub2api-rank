@@ -605,7 +605,10 @@ func TestOpenAIWSRateLimitFailoverError_OAuthKeepsSameAccountDeadline(t *testing
 	require.True(t, oauthErr.RetryableOnSameAccount)
 	require.False(t, oauthErr.SameAccountRetryDeadline.IsZero())
 	require.Positive(t, oauthErr.SameAccountRetryDelay)
-	require.LessOrEqual(t, oauthErr.SameAccountRetryDelay, openAIOAuth429MaxRetryDelay)
+	// 服务端 Retry-After 是唯一权威（codex-rs: sleep_until(retry_after.deadline())），
+	// 不被本地 backoff 上限截断；这里 30s 落在 2 分钟重试窗口内，应原样采信。
+	require.Greater(t, oauthErr.SameAccountRetryDelay, openAIOAuth429MaxRetryDelay)
+	require.LessOrEqual(t, oauthErr.SameAccountRetryDelay, openAIOAuth429RetryWindow)
 	require.Equal(t, body, oauthErr.ResponseBody)
 	require.Equal(t, "30", oauthErr.ResponseHeaders.Get("Retry-After"))
 

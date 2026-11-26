@@ -32,27 +32,33 @@ func (m *mockTempUnscheduler) TempUnscheduleRetryableError(_ context.Context, ac
 }
 
 func TestSameAccountRetryDelayFor(t *testing.T) {
-	capacityErr := &service.UpstreamFailoverError{RequestScopedTransient: true}
-
-	for _, tc := range []struct {
-		name       string
-		retryCount int
-		want       time.Duration
-	}{
-		// 对齐 codex-rs 的 backoff：200ms 起、逐次翻倍，上限 3.2s。
-		{name: "first retry", retryCount: 1, want: 200 * time.Millisecond},
-		{name: "second retry", retryCount: 2, want: 400 * time.Millisecond},
-		{name: "third retry", retryCount: 3, want: 800 * time.Millisecond},
-		{name: "fourth retry", retryCount: 4, want: 1600 * time.Millisecond},
-		{name: "fifth retry", retryCount: 5, want: 3200 * time.Millisecond},
-		{name: "capped retry", retryCount: 10, want: 3200 * time.Millisecond},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, sameAccountRetryDelayFor(capacityErr, tc.retryCount))
-		})
+	// 对齐 codex-rs 的 backoff：200ms 起、逐次翻倍，上限 3.2s。
+	// 两条可重试来源都必须让退避生长：request-scoped 临时故障，以及
+	// RetryableOnSameAccount（OAuth 429 走这条，不带 RequestScopedTransient）。
+	retryableErrs := map[string]*service.UpstreamFailoverError{
+		"capacity": {RequestScopedTransient: true},
+		"oauth429": {RetryableOnSameAccount: true},
+	}
+	for name, failoverErr := range retryableErrs {
+		for _, tc := range []struct {
+			name       string
+			retryCount int
+			want       time.Duration
+		}{
+			{name: "first retry", retryCount: 1, want: 200 * time.Millisecond},
+			{name: "second retry", retryCount: 2, want: 400 * time.Millisecond},
+			{name: "third retry", retryCount: 3, want: 800 * time.Millisecond},
+			{name: "fourth retry", retryCount: 4, want: 1600 * time.Millisecond},
+			{name: "fifth retry", retryCount: 5, want: 3200 * time.Millisecond},
+			{name: "capped retry", retryCount: 10, want: 3200 * time.Millisecond},
+		} {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
+				require.Equal(t, tc.want, sameAccountRetryDelayFor(failoverErr, tc.retryCount))
+			})
+		}
 	}
 
-	t.Run("non request scoped errors keep fixed delay", func(t *testing.T) {
+	t.Run("non retryable errors keep fixed delay", func(t *testing.T) {
 		require.Equal(t, 200*time.Millisecond, sameAccountRetryDelayFor(&service.UpstreamFailoverError{}, 10))
 	})
 

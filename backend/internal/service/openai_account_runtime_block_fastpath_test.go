@@ -380,10 +380,31 @@ func TestOpenAIHTTP429StillUsesQuotaResetHeaders(t *testing.T) {
 	require.Greater(t, time.Until(blockedUntil), 6*24*time.Hour, "real HTTP 429 must retain the upstream quota reset")
 }
 
-func TestOpenAI429RetryDelayHonorsBoundedRetryAfter(t *testing.T) {
+func TestOpenAI429RetryDelayHonorsServerAdvice(t *testing.T) {
 	deadline := time.Now().Add(openAIOAuth429RetryWindow)
-	require.Equal(t, openAIOAuth429RetryDelay, openAIOAuth429SameAccountRetryDelay(nil, deadline))
-	require.Equal(t, openAIOAuth429MaxRetryDelay, openAIOAuth429SameAccountRetryDelay(http.Header{"Retry-After": []string{"90"}}, deadline))
+
+	// 服务端没有建议时返回 0，交给 handler 的 backoff(retry_count)：
+	// 若这里返回固定 200ms，handler 会一直走"显式值优先"分支，退避永不生长。
+	require.Zero(t, openAIOAuth429SameAccountRetryDelay(nil, deadline))
+	require.Zero(t, openAIOAuth429SameAccountRetryDelay(http.Header{}, deadline))
+
+	// codex-rs 的 retry_delay 在服务端给建议时直接睡到该时刻
+	// （codex-client/retry.rs `sleep_until(retry_after.deadline())`），
+	// 本地 backoff 上限只约束无建议时的指数退避，不截断服务端建议。
+	require.InDelta(t, float64(90*time.Second),
+		float64(openAIOAuth429SameAccountRetryDelay(http.Header{"Retry-After": []string{"90"}}, deadline)),
+		float64(200*time.Millisecond))
+
+	// 超过重试窗口的建议由窗口 deadline 兜底：剩余时长已不足 90s 时取剩余时长。
+	shortDeadline := time.Now().Add(10 * time.Second)
+	require.InDelta(t, float64(10*time.Second),
+		float64(openAIOAuth429SameAccountRetryDelay(http.Header{"Retry-After": []string{"90"}}, shortDeadline)),
+		float64(200*time.Millisecond))
+
+	// 窗口内的小值建议原样采信，不被 3.2s 本地 backoff 上限截断。
+	require.InDelta(t, float64(8*time.Second),
+		float64(openAIOAuth429SameAccountRetryDelay(http.Header{"Retry-After": []string{"8"}}, deadline)),
+		float64(200*time.Millisecond))
 }
 
 func TestOpenAI429FastPath_OpenCodeGoUsageLimitUsesMessageResetDuration(t *testing.T) {
