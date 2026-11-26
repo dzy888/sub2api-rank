@@ -1044,9 +1044,11 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	// 只在指针非 nil 时更新 Concurrency（支持设置为 0）
 	if input.Concurrency != nil {
 		account.Concurrency = normalizeAccountConcurrency(account.Platform, account.Type, *input.Concurrency)
-	} else {
-		// 未显式填写时，若配置了单会话上限则按「会话数 × 上限」推导账号并发，
-		// 否则并发会停留在旧值，请求会堆在上游而不是排在我们自己的队列里。
+	} else if account.Concurrency <= 0 {
+		// 仅在账号还没有并发上限时才用「会话数 × 单会话上限」推导。
+		// 已经配过的账号编辑其它字段（状态、分组、代理……）时，不能把管理员
+		// 设置的容量再改写成推导值——否则界面上「容量」会莫名其妙变成 13×4=52，
+		// 而不是管理员填的数。
 		applyOpenAISessionConcurrencyBudget(account, input.Concurrency)
 	}
 	// 只在指针非 nil 时更新 Priority（支持设置为 0）
