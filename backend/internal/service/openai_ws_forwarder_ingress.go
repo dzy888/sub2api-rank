@@ -895,6 +895,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 	parseClientPayload := func(turn int, raw []byte) (openAIWSClientPayload, error) {
 		clientPayloadRaw := append([]byte(nil), raw...)
+		// 每轮先 stage 指纹 ID：本轮 payload 改写与（首轮的）握手头都读同一份。
+		// 放在最前面，保证首轮解析时 ids 已就绪——握手头在本函数返回之后才构造。
+		stageWSFingerprintIDsRaw(c, account, raw)
 		prepared, prepareErr := agentRecovery.prepareReadable(account, raw)
 		if prepareErr != nil {
 			return openAIWSClientPayload{}, openAIWSAgentRecoveryClose(prepareErr)
@@ -1167,6 +1170,19 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		normalized = policyApplied
 		ingressSessionOriginalModel = originalModel
+
+		// 指纹收敛：ingress 把客户端帧原样写给上游（不经过
+		// buildOpenAIWSCreatePayload），所以 client_metadata 必须在这里补。
+		// Codex 的每条 response.create 都由 responses_metadata.client_metadata
+		// 组装（client.rs:1369 与 HTTP 共用），缺 installation_id / request_kind /
+		// thread_source / turn_id 等字段是明显差异。
+		if ids := stagedCodexFingerprintIDs(c, account); ids != nil {
+			if converged, changed, convErr := applyCodexFingerprintClientMetadataRaw(normalized, ids); convErr != nil {
+				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", convErr)
+			} else if changed {
+				normalized = converged
+			}
+		}
 
 		return openAIWSClientPayload{
 			clientPayloadRaw:         clientPayloadRaw,
@@ -1678,13 +1694,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	firstRoutingFields := gjson.GetManyBytes(firstPayload.payloadRaw, "model", "service_tier")
-	// 握手头与 body 必须共用同一份收敛身份：指纹 ID 必须先 stage，buildOpenAIWSHeaders
-	// 里的 applyStagedCodexFingerprintHeaders 才能读到。此前只有 HTTP 出站
-	// (openai_gateway_forward) 会 stage，WS ingress 从不 stage，于是握手与
-	// response.create 的 client_metadata 都缺 installation_id / request_kind /
-	// thread_source / turn_id 等 Codex 恒发字段（client.rs:1369 与 HTTP 共用
-	// 同一个 client_metadata 构造）。
-	stageWSFingerprintIDsRaw(c, account, firstPayload.payloadRaw)
+	// 指纹 ID 已在 parseClientPayload 开头 stage；这里的 buildOpenAIWSHeaders
+	// 通过 applyStagedCodexFingerprintHeaders 读到同一份身份，保证握手头与
+	// response.create 的 client_metadata 一致（Codex 的 client.rs:1369 两者同源）。
 	wsHeaders, _, buildHdrErr := s.buildOpenAIWSHeaders(
 		ctx,
 		c,
