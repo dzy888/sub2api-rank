@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2006,6 +2007,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 		}
 		latencyGenerationStartedTurn = turn
+		s.debugLogGatewaySnapshot("UPSTREAM_WS_TURN", nil, payload, map[string]string{
+			"account":   fmt.Sprintf("%d(%s)", account.ID, account.Name),
+			"turn":      strconv.Itoa(turn),
+			"transport": "responses_websockets_v2",
+		})
 		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {
 			return nil, wrapOpenAIWSIngressTurnError(
 				"write_upstream",
