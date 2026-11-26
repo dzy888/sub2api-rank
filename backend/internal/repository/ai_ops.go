@@ -202,6 +202,9 @@ func readAIOpsAccounts(ctx context.Context, tx *sql.Tx, ids []int64) (map[int64]
 // deliberately excluded from automatic fault evidence.
 // A final failure wins over a conflicting completed usage trace for the same
 // request: partial billable output must not add a second, successful sample.
+// A client that closes the connection after the terminal event makes the
+// middleware record canceled=true on a completed response, so canceled is not
+// a completion test; body_complete/terminal/client_disconnect are.
 var aiOpsEvidenceSQL = `WITH success_candidates AS (
  SELECT u.request_id,u.api_key_id,u.model,COALESCE(u.reasoning_effort,'') AS effort,
  t.detail->'protocol_decision'->>'upstream' AS protocol,
@@ -213,7 +216,7 @@ var aiOpsEvidenceSQL = `WITH success_candidates AS (
  ) t ON true
  WHERE u.account_id=$1 AND u.created_at>=$2 AND u.created_at<$3
  AND t.detail->>'version'='1' AND t.detail->>'outcome'='success' AND t.detail->>'status'='200'
- AND t.detail->>'body_complete'='true' AND t.detail->>'canceled'='false' AND t.detail->>'truncated'='false'
+ AND t.detail->>'body_complete'='true' AND t.detail->>'truncated'='false'
  AND t.detail->>'client_disconnect'='false' AND t.detail->>'downstream_error'='false'
  AND (jsonb_path_query_first_tz(jsonb_build_object('at',regexp_replace(regexp_replace(t.detail->>'started_at','Z$','+00:00'),'(\.[0-9]{6})[0-9]+([+-])','\1\2')),'$.at.datetime()','{}',true)#>>'{}')::timestamptz >= $2
  AND (jsonb_path_query_first_tz(jsonb_build_object('at',regexp_replace(regexp_replace(t.detail->>'started_at','Z$','+00:00'),'(\.[0-9]{6})[0-9]+([+-])','\1\2')),'$.at.datetime()','{}',true)#>>'{}')::timestamptz < $3

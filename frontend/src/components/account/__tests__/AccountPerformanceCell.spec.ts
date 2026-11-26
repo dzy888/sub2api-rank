@@ -81,7 +81,7 @@ describe('average request cache rate', () => {
  it.each(['en', 'zh'])('explains request weighting, samples and refreshed window in %s', async locale => {
   const w = mount(Cell, { props: { metrics: { avg_cache_percent: 70, cache_samples: 2 } }, global: { plugins: [createI18n({legacy:false,locale,messages:{en,zh}})] } })
   await w.get('[data-testid="cache-help"]').trigger('click')
-  expect(document.body.textContent).toContain(locale === 'zh' ? '算术平均' : 'Arithmetic mean')
+  expect(document.body.textContent).toContain(locale === 'zh' ? '按 Token 汇总' : 'pooled by token')
   expect(document.body.textContent).toContain(locale === 'zh' ? '有效样本 2 条' : 'Valid samples: 2')
   await w.setProps({ metrics: { avg_cache_percent: 0, cache_samples: 1, window_start: '2026-11-12T00:00:00Z', window_end: '2026-11-12T00:15:00Z' } })
   expect(document.body.textContent).toContain(locale === 'zh' ? '最近15分钟' : 'last 15 minutes')

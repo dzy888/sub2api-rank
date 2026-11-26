@@ -26,9 +26,11 @@
 
 ## 平均缓存
 
-账号列表的「性能 · 近60分钟」列及使用同一组件的阈值弹窗新增「平均缓存」。它跟随全局滚动周期，显示有效请求缓存命中率的算术平均：每条请求先计算 `100 × cache_read_tokens / (input_tokens + cache_read_tokens + cache_creation_tokens)`，再按请求等权平均。`input_tokens` 是已归一化的未缓存输入；这不是按 Token 加权的总命中率。
+账号列表的「性能 · 近60分钟」列及使用同一组件的阈值弹窗显示「缓存命中率」。它跟随全局滚动周期，口径与用量记录和渠道监控一致：窗口内 `100 × Σcache_read_tokens / Σ(input_tokens + cache_read_tokens + cache_creation_tokens)`，按 Token 汇总而不是按请求等权平均，因此 76 Token 的探针不会和整轮对话同权。`input_tokens` 是已归一化的未缓存输入。
 
-统计复用性能查询中按请求开始时间筛选的完整成功文本请求；缺少唯一完整耗时记录、失败或不完整请求、媒体请求均不计入。三个输入桶必须非负且总和大于零；没有有效样本显示「未采集」，有效零命中显示 `0.0%`。提示说明包含当前周期和样本数。批量性能响应新增 `avg_cache_percent`（百分比或 `null`）与 `cache_samples`，旧服务缺少字段时前端显示「未采集」。
+统计复用性能查询中按请求开始时间筛选的完整成功文本请求；缺少唯一完整耗时记录、失败或不完整请求、媒体请求均不计入。三个输入桶必须非负且总和大于零；没有有效样本显示「未采集」，有效零命中显示 `0.0%`。提示说明包含当前周期和样本数。
+
+`canceled` 不单独作为完成判据：客户端在 `response.completed` 后立即断开连接，Go 会取消请求上下文并把该轮记为 `canceled=true`，但响应其实已经完整写出。完成性由 `body_complete`、流式 `terminal=completed`、`client_disconnect=false` 和 `downstream_error=false` 共同证明；只有这样才不会漏掉绝大多数正常流式请求。批量性能响应新增 `avg_cache_percent`（百分比或 `null`）与 `cache_samples`，旧服务缺少字段时前端显示「未采集」。
 
 此项只用于展示，不新增缓存阈值、不改变暂停条件或优先级评分。复用现有批量 SQL，无新增请求、定时任务或数据库迁移。新功能提示使用 `account-average-cache-initial-announcement`，账号列表、阈值弹窗与复用性能组件的优先级分析页共用 ID。
 

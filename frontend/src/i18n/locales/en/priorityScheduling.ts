@@ -1,6 +1,6 @@
 export default {
   cache_weight: 'Cache hit rate weight',
-  cacheWeightHint: 'Available in every scheduling mode; defaults to 0 (excluded from scoring). The cache rate is an arithmetic mean across requests. With at least the minimum sample count, higher cache rates score higher. Missing or invalid samples use a neutral 0.5 score and are marked insufficient. Weights are normalized by their sum; cache preference cannot bypass eligibility, capacity or session ownership.',
+  cacheWeightHint: 'Available in every scheduling mode; defaults to 0 (excluded from scoring). The cache rate pools tokens across requests. With at least the minimum sample count, higher cache rates score higher. Missing or invalid samples use a neutral 0.5 score and are marked insufficient. Weights are normalized by their sum; cache preference cannot bypass eligibility, capacity or session ownership.',
   target_tps: 'Average TPS score target (tokens/s)',
   performanceSource: 'Source: account performance',
   analysis: {

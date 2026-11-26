@@ -116,15 +116,18 @@ func TestAccountPerformancePostgresWindowAndSuccessfulAverages(t *testing.T) {
 	metrics, err := readAccountPerformance(ctx, tx, []int64{account.ID, empty.ID}, now)
 	require.NoError(t, err, "execute production metrics SQL against migrated PostgreSQL")
 	got := metrics[account.ID]
-	require.Equal(t, 2, got.CacheSamples)
+	// The canceled sample completed (body_complete, terminal=completed); clients
+	// close the connection after a terminal event, so canceled alone must not
+	// disqualify it. Cache rate pools tokens over the official definition.
+	require.Equal(t, 3, got.CacheSamples)
 	require.NotNil(t, got.AvgCachePercent)
-	require.InDelta(t, 70, *got.AvgCachePercent, 0.00001, "request average of 50%% and 90%%, not token-weighted; includes cache writes")
-	require.Equal(t, 2, got.TPSSamples)
-	require.Equal(t, 2, got.TTFTSamples)
+	require.InDelta(t, 1949.0/2100.0*100, *got.AvgCachePercent, 0.00001, "token-pooled cache reads, not the per-request mean")
+	require.Equal(t, 3, got.TPSSamples)
+	require.Equal(t, 3, got.TTFTSamples)
 	require.NotNil(t, got.AvgTPS)
 	require.NotNil(t, got.AvgTTFTMs)
-	require.InDelta(t, 75, *got.AvgTPS, 0.00001, "arithmetic mean of 100/2 and 400/4, not pooled tokens/duration")
-	require.InDelta(t, 1000, *got.AvgTTFTMs, 0.00001)
+	require.InDelta(t, (100.0/2+400.0/4+9000.0/1000)/3, *got.AvgTPS, 0.00001, "arithmetic mean of per-request throughput, not pooled tokens/duration")
+	require.InDelta(t, (500.0+1500+900)/3, *got.AvgTTFTMs, 0.00001)
 	require.Nil(t, got.DegradationPercent, "no quality probes is unknown, never 0%%")
 	require.Zero(t, got.QualitySamples)
 	require.Equal(t, since, got.WindowStart)
@@ -153,20 +156,20 @@ func TestAccountPerformancePostgresWindowAndSuccessfulAverages(t *testing.T) {
 	require.NoError(t, err)
 	got = metrics[account.ID]
 	require.Equal(t, now.Add(-15*time.Minute), got.WindowStart)
-	require.Equal(t, 1, got.TPSSamples)
-	require.Equal(t, 1, got.TTFTSamples)
-	require.InDelta(t, 100, *got.AvgTPS, 0.00001)
-	require.InDelta(t, 1500, *got.AvgTTFTMs, 0.00001)
-	require.Equal(t, 1, got.CacheSamples)
-	require.InDelta(t, 90, *got.AvgCachePercent, 0.00001)
+	require.Equal(t, 2, got.TPSSamples)
+	require.Equal(t, 2, got.TTFTSamples)
+	require.InDelta(t, (100.0/2+9000.0/1000)/2, *got.AvgTPS, 0.00001)
+	require.InDelta(t, (1500.0+900)/2, *got.AvgTTFTMs, 0.00001)
+	require.Equal(t, 2, got.CacheSamples)
+	require.InDelta(t, 1899.0/2000.0*100, *got.AvgCachePercent, 0.00001)
 
 	// Measured zero is included even without TPS output; all-cache is valid 100%.
 	add(sample{name: "measured-zero", input: 100, event: now, recorded: now, traces: 1})
 	add(sample{name: "all-cache", read: 200, event: now, recorded: now, traces: 1})
 	metrics, err = readAccountPerformance(ctx, tx, []int64{account.ID}, now)
 	require.NoError(t, err)
-	require.Equal(t, 3, metrics[account.ID].CacheSamples)
-	require.InDelta(t, (90.0+0+100)/3, *metrics[account.ID].AvgCachePercent, 0.00001)
+	require.Equal(t, 4, metrics[account.ID].CacheSamples)
+	require.InDelta(t, 2099.0/2300.0*100, *metrics[account.ID].AvgCachePercent, 0.00001)
 }
 
 func TestAccountPerformancePostgresCompletedQualityProbeRounds(t *testing.T) {

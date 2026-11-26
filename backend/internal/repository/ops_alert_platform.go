@@ -60,8 +60,13 @@ func (r *opsRepository) GetAlertPlatformStats(ctx context.Context, filter servic
    WHEN t.detail->>'client_disconnect'='true' OR t.detail->>'outcome'='client_disconnected' THEN 'exclude'
    WHEN t.detail->>'terminal' IN ('failed','incomplete') OR t.detail->>'outcome'='failed' THEN 'failed'
    WHEN t.detail->>'downstream_error'='true' THEN 'failed'
+   -- Clients close the connection after a terminal event; that cancel is not an
+   -- abort. Only fall back to exclude when completion is not proven.
+   WHEN u.stream THEN CASE
+     WHEN t.detail->>'terminal'='completed' AND t.detail->>'outcome'='success' THEN 'success'
+     WHEN t.detail->>'canceled'='true' THEN 'exclude'
+     ELSE 'unknown' END
    WHEN t.detail->>'canceled'='true' THEN 'exclude'
-   WHEN u.stream THEN CASE WHEN t.detail->>'terminal'='completed' AND t.detail->>'outcome'='success' THEN 'success' ELSE 'unknown' END
    ELSE 'success'
  END AS outcome
  FROM usage_rows u LEFT JOIN LATERAL (

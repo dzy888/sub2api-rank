@@ -54,6 +54,11 @@ func (r *accountPerformanceRepository) Stop() {
 // The trace start is the actual event time, not the asynchronous usage insert.
 // Normalize Z and nanoseconds before jsonpath .datetime(): PostgreSQL 14-16
 // needs an explicit UTC offset; all supported versions accept microseconds.
+//
+// Cache rate uses the official cache-rate definition (the one behind usage
+// records and the channel monitor): cache reads divided by uncached input plus
+// cache reads plus cache writes. The window pools tokens instead of averaging
+// per-request ratios, so a 76-token probe cannot weigh as much as a full turn.
 const performanceMetricsSQL = `
 WITH source AS MATERIALIZED (
  SELECT u.account_id,u.output_tokens,u.duration_ms,u.first_token_ms,u.stream,
@@ -76,7 +81,10 @@ WITH source AS MATERIALIZED (
  AND COALESCE(u.image_count,0)=0 AND COALESCE(u.image_output_tokens,0)=0
  AND COALESCE(u.billing_mode,'token') NOT IN ('image','video')
  AND d.version='1' AND d.outcome='success' AND d.status='200' AND d.body_complete='true'
- AND d.canceled='false' AND d.truncated='false'
+ -- Clients close the connection right after a terminal event, so Go cancels the
+ -- request context and the middleware records canceled=true on completed
+ -- responses. Completion is proven by body_complete/terminal/client_disconnect.
+ AND d.truncated='false'
  AND d.client_disconnect='false' AND d.downstream_error='false'
  AND (NOT u.stream OR d.terminal='completed')
 ), successful AS (
@@ -87,8 +95,15 @@ WITH source AS MATERIALIZED (
  COUNT(*) FILTER(WHERE output_tokens>=2 AND duration_ms>0) AS tps_n,
  AVG(first_token_ms) FILTER(WHERE stream AND first_token_ms>=0 AND first_token_ms<=duration_ms AND output_tokens>=2) AS ttft,
  COUNT(*) FILTER(WHERE stream AND first_token_ms>=0 AND first_token_ms<=duration_ms AND output_tokens>=2) AS ttft_n,
- AVG(100.0*cache_read_tokens/NULLIF(input_tokens::numeric+cache_read_tokens+cache_creation_tokens,0))
-  FILTER(WHERE input_tokens>=0 AND cache_read_tokens>=0 AND cache_creation_tokens>=0) AS cache_percent,
+ -- Token-pooled cache read share, matching the official definition. Rows with a
+ -- negative bucket stay out; a measured zero still counts as a sample.
+ CASE WHEN SUM(input_tokens::numeric+cache_read_tokens+cache_creation_tokens)
+   FILTER(WHERE input_tokens>=0 AND cache_read_tokens>=0 AND cache_creation_tokens>=0)>0
+  THEN 100.0*SUM(cache_read_tokens)
+   FILTER(WHERE input_tokens>=0 AND cache_read_tokens>=0 AND cache_creation_tokens>=0)
+   /SUM(input_tokens::numeric+cache_read_tokens+cache_creation_tokens)
+   FILTER(WHERE input_tokens>=0 AND cache_read_tokens>=0 AND cache_creation_tokens>=0)
+ END AS cache_percent,
  COUNT(*) FILTER(WHERE input_tokens>=0 AND cache_read_tokens>=0 AND cache_creation_tokens>=0
   AND input_tokens::numeric+cache_read_tokens+cache_creation_tokens>0) AS cache_n
  FROM successful GROUP BY account_id

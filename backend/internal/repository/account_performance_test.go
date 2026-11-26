@@ -49,6 +49,11 @@ func TestAccountPerformanceQueryBoundsAndMissingSamples(t *testing.T) {
 	require.Contains(t, performanceMetricsSQL, "event_at >= $2 AND event_at <= $3")
 	require.Contains(t, performanceMetricsSQL, "MIN(r.started_at)>=$2")
 	require.Contains(t, performanceMetricsSQL, "NULLIF(COUNT(*) FILTER(WHERE passed OR failed),0)")
+	// Canceled must not disqualify a completed stream.
+	require.NotContains(t, performanceMetricsSQL, "d.canceled='false'")
+	require.Contains(t, performanceMetricsSQL, "d.body_complete='true'")
+	// Cache rate is token-pooled, matching the official cache-rate definition.
+	require.Contains(t, performanceMetricsSQL, "100.0*SUM(cache_read_tokens)")
 }
 func TestAccountPerformanceEvaluateNoSamplesAndHeldLock(t *testing.T) {
 	for _, locked := range []bool{false, true} {
