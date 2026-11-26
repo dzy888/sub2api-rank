@@ -1184,6 +1184,21 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				normalized = converged
 			}
 		}
+		// Codex 的 ResponseCreateWsRequest 里 tool_choice / parallel_tool_calls /
+		// store / include / reasoning 都是非 Option 字段，每条 response.create 必发
+		// （codex-api/src/common.rs:467-495，From<ResponsesApiRequest> 全量拷贝）。
+		// 客户端省略时补齐默认值，避免出站帧比真实客户端少字段。
+		//
+		// agent recovery（409 可读重放）例外：那条路径的 controls digest 是在
+		// 补齐之前的原始帧上冻结的，这里再改帧会触发 wire_changed。
+		if openAIAgentRecoveryFromContext(ctx) == nil {
+			alignStore := account != nil && account.UsesOpenAICodexProtocol() && !s.isOpenAIWSStoreRecoveryAllowed(account)
+			if aligned, changed, alignErr := alignCodexWSResponseCreateFrameWithStore(normalized, alignStore); alignErr != nil {
+				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", alignErr)
+			} else if changed {
+				normalized = aligned
+			}
+		}
 
 		return openAIWSClientPayload{
 			clientPayloadRaw:         clientPayloadRaw,

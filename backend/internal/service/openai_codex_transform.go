@@ -2017,6 +2017,85 @@ func alignCodexRequestEnvelope(reqBody map[string]any) bool {
 	return changed
 }
 
+// alignCodexWSResponseCreateFrame 在原始字节上补齐 WS response.create 的必发字段。
+//
+// 出处 codex-api/src/common.rs:467-495 的 ResponseCreateWsRequest：
+// tool_choice / parallel_tool_calls / store / include 均非 Option，reasoning 也在
+// From<&ResponsesApiRequest> 里全量拷贝，因此真实客户端每条 response.create 都带。
+// WS ingress 把客户端帧原样转发，客户端省略这些字段时出站帧就会比真实客户端短。
+//
+// 与 alignCodexRequestEnvelope 保持同样的「只补缺省、不覆盖客户端声明」语义；
+// 用 sjson 逐字段写入，避免对可能数 MB 的帧做全量 Unmarshal/Marshal。
+func alignCodexWSResponseCreateFrame(body []byte) ([]byte, bool, error) {
+	return alignCodexWSResponseCreateFrameWithStore(body, true)
+}
+
+// alignCodexWSResponseCreateFrameWithStore 由调用方决定是否补 store。
+//
+// store 参与 isOpenAIWSStoreDisabledInRequestRaw 的「字段是否显式声明」判定，
+// 从而影响会话亲和与连接复用：只有 OAuth（Codex）账号该补 false，API-key
+// 账号补了会把普通请求误判成 store-disabled。
+func alignCodexWSResponseCreateFrameWithStore(body []byte, withStore bool) ([]byte, bool, error) {
+	if len(body) == 0 {
+		return body, false, nil
+	}
+	root := gjson.ParseBytes(body)
+	if !root.IsObject() {
+		return body, false, nil
+	}
+	// 只处理 response.create（缺 type 的帧也已在上游归一为 response.create）。
+	if typ := strings.TrimSpace(root.Get("type").String()); typ != "" && typ != "response.create" {
+		return body, false, nil
+	}
+
+	next := body
+	changed := false
+	setDefault := func(path string, value any) error {
+		if root.Get(path).Exists() {
+			return nil
+		}
+		updated, err := sjson.SetBytes(next, path, value)
+		if err != nil {
+			return err
+		}
+		next = updated
+		changed = true
+		return nil
+	}
+
+	// tool_choice 不补：HTTP 侧 alignCodexRequestEnvelope 已经只在缺失时补，
+	// 而 WS 帧的 tool_choice 还承载 additional_tools / namespace 语义，凭空
+	// 写入 "auto" 会覆盖「未声明工具选择」这一状态。
+	if err := setDefault("parallel_tool_calls", true); err != nil {
+		return body, false, err
+	}
+	// store 只在 withStore（OAuth/Codex 账号）时补：它参与
+	// isOpenAIWSStoreDisabledInRequestRaw 的「字段是否显式声明」判定，凭空给
+	// API-key 请求写入 false 会把它误判成 store-disabled 并触发 strict affinity。
+	if withStore {
+		if err := setDefault("store", false); err != nil {
+			return body, false, err
+		}
+	}
+	if !root.Get("include").Exists() {
+		updated, err := sjson.SetBytes(next, "include", []string{codexIncludeReasoningEncrypted})
+		if err != nil {
+			return body, false, err
+		}
+		next = updated
+		changed = true
+	}
+	if !root.Get("reasoning").Exists() {
+		updated, err := sjson.SetRawBytes(next, "reasoning", []byte(`{}`))
+		if err != nil {
+			return body, false, err
+		}
+		next = updated
+		changed = true
+	}
+	return next, changed, nil
+}
+
 const (
 	codexIncludeReasoningEncrypted = "reasoning.encrypted_content"
 	// 官方默认档位来自模型目录的 default_reasoning_level，网关侧取 medium。
