@@ -479,8 +479,14 @@ func resolveConvergedSubagentThreadIDForSlot(seed, clientSessionID string, slot 
 	// 内容合成的兜底会话没有真实客户端身份，只有一条「会话」却要承接全部无头并发：
 	// 按 V1 的 6 线程形状摊开（root 占 1，兄弟 5 个），否则全部并发会压在同一批
 	// 3 个线程上，直接撞单会话路由配额。
-	return deriveStableUUIDv4(fmt.Sprintf("sub2api:codex-subagent-thread-slot:v1:%s:%d",
-		seed, slot%(codexLegacyThreadsPerSession-1)))
+	//
+	// sessionID 必须进派生 key。slot 来自进程级轮转计数器，与会话无关；key 里不带
+	// session 时不同会话会落到同一批固定线程上，出现「一个 thread_id 横跨多个
+	// session_id」+「同一子线程挂在多个 parent_thread_id 下」的自相矛盾形状
+	// （真实 Codex 里 thread 不会跨 session，见 session/mod.rs:5577 的
+	// window_id = {thread_id}:{window_number}）。
+	return deriveStableUUIDv4(fmt.Sprintf("sub2api:codex-subagent-thread-slot:v1:%s:%s:%d",
+		seed, clientSessionID, slot%(codexLegacyThreadsPerSession-1)))
 }
 
 // isRealClientFingerprintSession 判断会话身份是否来自客户端声明的头。

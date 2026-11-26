@@ -1175,3 +1175,41 @@ func TestResolveCodexFingerprintIDs_SubagentModeContentFanout(t *testing.T) {
 	require.Equal(t, h.sessionID, h.threadID)
 	require.NotEqual(t, a.sessionID, h.sessionID)
 }
+
+// 兜底会话的子线程必须按 session 派生：slot 来自进程级轮转计数器，
+// 若 key 里不带 session，不同会话会共享同一批 thread，出现
+// 「一个 thread_id 横跨多个 session_id」——真实 Codex 里 thread 不跨会话
+// （session/mod.rs:5577 window_id = {thread_id}:{window_number}）。
+func TestResolveCodexFingerprintIDs_ThreadStaysInsideSession(t *testing.T) {
+	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "subagent"})
+	headers := func() http.Header { return http.Header{} }
+	body := func(first string) []byte {
+		return []byte(`{"model":"gpt-5.6-sol","input":[{"role":"user","content":"` + first + `"}]}`)
+	}
+
+	// 多个会话各打若干请求，收集 thread → session 的归属。
+	threadOwner := map[string]string{}
+	threadsPerSession := map[string]map[string]bool{}
+	for _, conv := range []string{"alpha", "beta", "gamma", "delta"} {
+		for i := 0; i < 20; i++ {
+			ids := resolveCodexFingerprintIDsFromRequestWithBody(account, headers(), body(conv))
+			require.NotNil(t, ids)
+			if prev, ok := threadOwner[ids.threadID]; ok {
+				require.Equal(t, prev, ids.sessionID,
+					"thread %s 同时属于 %s 和 %s，线程跨会话已被破坏", ids.threadID, prev, ids.sessionID)
+			}
+			threadOwner[ids.threadID] = ids.sessionID
+			if threadsPerSession[ids.sessionID] == nil {
+				threadsPerSession[ids.sessionID] = map[string]bool{}
+			}
+			threadsPerSession[ids.sessionID][ids.threadID] = true
+			require.Equal(t, ids.sessionID, ids.parentThreadID, "子线程的父线程必须是本会话根线程")
+		}
+	}
+
+	require.Len(t, threadsPerSession, 4, "四段不同对话必须是四个上游会话")
+	for sid, threads := range threadsPerSession {
+		require.LessOrEqual(t, len(threads), codexLegacyThreadsPerSession-1,
+			"会话 %s 的子线程数超过了 V1 单会话上限", sid)
+	}
+}
